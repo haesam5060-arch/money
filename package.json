@@ -1,0 +1,16 @@
+{
+  "name": "paper-trader",
+  "version": "1.0.0",
+  "description": "백테스터 로직 기반 실전 모의투자 추적기",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "express": "^4.18.0",
+    "iconv-lite": "^0.7.2",
+    "nodemailer": "^8.0.1"
+  }
+}

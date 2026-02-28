@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>모의투자 추적기</title>
+<link rel="stylesheet" href="styles.css">
+<!-- CSS moved to styles.css -->
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div class="hdr-left">
+    <div>
+      <h1>모의투자 추적기</h1>
+      <p>백테스터 검증 전략 기반 · 한국투자증권 API</p>
+    </div>
+    <span class="regime-badge regime-bull" id="regimeBadge" title="KOSPI 시장 국면">-</span>
+    <span class="circuit-badge" id="circuitBadge" style="display:none" title="서킷브레이커 발동">5연패 쿨다운</span>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:11px;color:#5A5450">RSI &ge; <span id="hdrRsiMin">70</span> 필터</div>
+    <div style="font-size:11px;color:#5A5450" id="hdrProfile">프로필: auto</div>
+  </div>
+</header>
+
+<!-- 종목 검색 -->
+<div class="search-bar">
+  <span class="search-icon">&#x1F50D;</span>
+  <input id="searchInput" type="text" placeholder="종목 검색 (이름 또는 코드)" autocomplete="off"
+    oninput="onSearchInput()" onfocus="onSearchInput()"
+    onblur="setTimeout(()=>document.getElementById('searchDropdown').style.display='none',200)">
+  <div class="search-dropdown" id="searchDropdown"></div>
+</div>
+
+<!-- 계좌 잔고 현황 -->
+<div class="acct-bar">
+  <div class="acct-item" title="모의투자 시드머니. 종목당 1주 지정가 매수">
+    <div class="a-lbl">가용 금액 (시드)</div>
+    <div class="a-val acct-unlimited">&infin; 무제한</div>
+    <div class="a-sub">1회 매매: 1주 (지정가)</div>
+  </div>
+  <div class="acct-item" title="현재 보유 포지션의 매수가 기준 투자금 합계">
+    <div class="a-lbl">보유 주식 투자금</div>
+    <div class="a-val" id="pInvested">&ndash;</div>
+    <div class="a-sub" id="pOpen">포지션 0개 &middot; 대기 0개</div>
+  </div>
+  <div class="acct-item" title="완료된 거래의 실현 손익 합계">
+    <div class="a-lbl">실현 손익</div>
+    <div class="a-val" id="pPnl">&ndash;</div>
+    <div class="a-sub" id="pPnlPct"></div>
+  </div>
+  <div class="acct-item" title="첫 스캔 후 경과한 전체 운영 기간">
+    <div class="a-lbl">운영 기간</div>
+    <div class="a-val" id="pPeriod">&ndash;</div>
+    <div class="a-sub" id="pStartDate">스캔 후 시작</div>
+  </div>
+</div>
+
+<!-- 성과 요약 -->
+<div class="port-bar">
+  <div class="port-card" title="익절/손절/만기로 종료된 총 거래 수"><div class="lbl">완료 거래</div><div class="val" id="pTrades">0</div><div class="sub" id="pWinCount"></div></div>
+  <div class="port-card" title="완료 거래 중 익절(수익) 비율. 50% 이상 목표"><div class="lbl">승률</div><div class="val" id="pWinRate">&ndash;</div><div class="sub">완료 거래 기준</div></div>
+  <div class="port-card" title="전체 완료 거래의 평균 수익률 (수수료/세금 포함)"><div class="lbl">평균 수익률</div><div class="val" id="pAvgRet">&ndash;</div><div class="sub" id="pPnlPct2"></div></div>
+  <div class="port-card" title="마지막으로 스캔을 실행한 날짜"><div class="lbl">마지막 스캔</div><div class="val" id="pLastScan" style="font-size:15px">&ndash;</div><div class="sub">매일 실행 권장</div></div>
+  <div class="port-card" title="모든 종목에 대해 1주씩 지정가 주문"><div class="lbl">주문 방식</div><div class="val" style="color:#4a9eff">1주</div><div class="sub">종목당 1주 지정가</div></div>
+  <div class="port-card" title="OHLCV 캐시 마지막 업데이트 시간"><div class="lbl">OHLCV 캐시</div><div class="val" id="pOhlcvStatus" style="font-size:13px;color:#7A7470">&ndash;</div><div class="sub" id="pOhlcvSub">캐시 상태</div></div>
+</div>
+
+<!-- 액션 바 -->
+<div class="action-bar">
+  <button class="btn btn-primary" id="scanBtn" onclick="runUnifiedScan()" title="서버에서 전 종목 분석 → Top 30 산출 → 자동 대기 주문 생성. 탭을 닫아도 진행됩니다.">스캔 시작</button>
+  <div class="price-preset-group">
+    <span style="font-size:11px;color:#7A7470;margin-right:4px;">스캔 범위:</span>
+    <button class="preset-btn active" data-min="0" data-max="0" onclick="setPreset(this)" title="전 종목 스캔">전체</button>
+    <button class="preset-btn" data-min="8000" data-max="9999" onclick="setPreset(this)" title="주가 8,000~9,999원대 종목만 스캔">8~9천</button>
+    <button class="preset-btn" data-min="80000" data-max="99999" onclick="setPreset(this)" title="주가 80,000~99,999원대 종목만 스캔">8~9만</button>
+  </div>
+  <button class="btn btn-outline btn-sm" onclick="toggleSettings()" title="KIS API 키, 이메일, 필터, 프로필 등 설정">설정</button>
+  <button class="btn btn-outline btn-sm" onclick="fetchLivePrices()" title="보유 포지션의 현재가를 KIS API로 갱신">현재가 갱신</button>
+  <span id="scanStatus" style="font-size:12px; color:#7A7470;"></span>
+</div>
+
+<!-- 진행바 -->
+<div class="progress-wrap" id="progressWrap">
+  <div class="progress-meta"><span id="progressLabel">전 종목 신호 분석 중...</span><span id="progressCount">0 / 0</span></div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+</div>
+
+<div id="scanToast"></div>
+
+<!-- 설정 패널 -->
+<div class="settings-panel" id="settingsPanel">
+  <h3>설정</h3>
+  <div class="form-row">
+    <div class="form-group"><label>APP Key<span class="help-tip">?<span class="ht-text">한국투자증권 OpenAPI에서 발급받은 APP Key<br>KIS Developers 사이트에서 발급</span></span></label><input type="password" id="cfgAppKey" placeholder="KIS APP Key"></div>
+    <div class="form-group"><label>APP Secret<span class="help-tip">?<span class="ht-text">한국투자증권 OpenAPI에서 발급받은 APP Secret<br>APP Key와 함께 발급됨</span></span></label><input type="password" id="cfgAppSecret" placeholder="KIS APP Secret"></div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>계좌번호 (앞 8자리)<span class="help-tip">?<span class="ht-text">한국투자증권 종합계좌번호 앞 8자리<br>뒤 2자리(01)는 자동 적용</span></span></label><input type="text" id="cfgCano" placeholder="68870931" maxlength="8"></div>
+    <div class="form-group"><label>신호 임계값<span class="help-tip">?<span class="ht-text">V2 시그널 점수 (15점 만점)<br>이 점수 이상이어야 매수 시그널 발생<br>높을수록 보수적, 기본 4.5</span></span></label><input type="number" id="cfgThreshold" value="4.5" step="0.5" min="2" max="15"></div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>RSI 최소값<span class="help-tip">?<span class="ht-text">이 RSI 이하의 종목은 매수 차단<br>70 권장 (검증: 승률 2.2배 차이)<br>0으로 설정하면 필터 비활성화</span></span></label><input type="number" id="cfgRsiMin" value="70" step="5" min="0" max="100"></div>
+    <div class="form-group">
+      <label>기본 프로필<span class="help-tip">?<span class="ht-text">auto=시총 기반 자동 선택<br>default=중소형 성장주<br>large_cap=대형 우량주<br>force_following=세력추종</span></span></label>
+      <select id="cfgProfile">
+        <option value="auto" selected>auto (시총 기반 자동)</option>
+        <option value="default">default (중소형주)</option>
+        <option value="large_cap">large_cap (대형주)</option>
+        <option value="force_following">force_following (세력추종)</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>벤포드 윈도우 (일)<span class="help-tip">?<span class="ht-text">세력 감시 기간 (일)<br>이 기간의 가격/거래량 패턴으로<br>기관/세력 매집 여부 판별</span></span></label>
+      <input type="number" id="cfgBenfordWindow" value="30" min="10" max="60" step="5">
+    </div>
+    <div class="form-group">
+      <label>벤포드 영향도 (%)<span class="help-tip">?<span class="ht-text">세력 감지 시 매수 점수에<br>가산되는 비율 (%)<br>0이면 벤포드 분석 비활성화</span></span></label>
+      <input type="number" id="cfgBenfordInfluence" value="15" min="0" max="30" step="5">
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>세력 최소 감지횟수<span class="help-tip">?<span class="ht-text">벤포드 이상 패턴이 이 횟수 이상<br>감지되어야 세력으로 판정<br>높이면 엄격한 판정</span></span></label>
+      <input type="number" id="cfgBenfordMinHits" value="3" min="1" max="15" step="1">
+    </div>
+    <div class="form-group">
+      <label>레짐 필터<span class="help-tip">?<span class="ht-text">KOSPI 시장 상태 감지<br>ON=약세장에서 매수 자동 차단<br>5개 지표(MA/RSI/VIX 등) 점수화</span></span></label>
+      <select id="cfgRegimeFilter"><option value="1" selected>ON</option><option value="0">OFF</option></select>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>서킷 브레이커<span class="help-tip">?<span class="ht-text">5연패 발생 시 +15일 추가 쿨다운<br>연속 손실 시 자동 매매 중단<br>감정적 매매 방지 장치</span></span></label>
+      <select id="cfgCircuitBreaker"><option value="1" selected>ON</option><option value="0">OFF</option></select>
+    </div>
+    <div class="form-group"></div>
+  </div>
+  <div class="form-row">
+    <div class="form-group" style="grid-column:1/-1">
+      <label>Anthropic API Key<span class="help-tip">?<span class="ht-text">손절 발생 시 AI 분석에 사용<br>Claude API 키 (sk-ant-api03-...)<br>없으면 AI 분석 비활성화</span></span></label>
+      <input type="password" id="cfgAnthropicKey" placeholder="sk-ant-api03-...">
+    </div>
+  </div>
+  <hr style="border:none;border-top:1px solid #2A2825;margin:16px 0;">
+  <h4 style="margin:0 0 12px;color:#C8C2BC;font-size:13px;">이메일 알림 설정</h4>
+  <div class="form-row">
+    <div class="form-group">
+      <label>수신 이메일 <span style="color:#5A5450;font-size:10px">Gmail 권장</span></label>
+      <input type="email" id="cfgEmailTo" placeholder="haesam5060@gmail.com">
+    </div>
+    <div class="form-group">
+      <label>Gmail App Password <span style="color:#5A5450;font-size:10px">16자리</span></label>
+      <input type="password" id="cfgEmailAppPw" placeholder="xxxx xxxx xxxx xxxx" maxlength="19">
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>이메일 알림</label>
+      <select id="cfgEmailEnabled"><option value="1">ON</option><option value="0" selected>OFF</option></select>
+    </div>
+    <div class="form-group" style="display:flex;align-items:flex-end;">
+      <button class="btn btn-outline btn-sm" onclick="testEmail()" id="testEmailBtn">테스트 전송</button>
+      <span id="testEmailMsg" style="font-size:11px;margin-left:8px;"></span>
+    </div>
+  </div>
+  <div style="font-size:11px;color:#5A5450;margin-bottom:12px;line-height:1.5;">
+    Google 계정 → 보안 → 2단계 인증 → 앱 비밀번호 생성 → 16자리 코드 입력<br>
+    매수/매도/스캔 완료 시 알림이 발송됩니다.
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="saveConfig()">저장</button>
+  <hr style="border:none;border-top:1px solid #2A2825;margin:16px 0;">
+  <h4 style="margin:0 0 12px;color:#C8C2BC;font-size:13px;">매매 로직</h4>
+  <div style="display:flex;gap:8px;margin-bottom:16px;">
+    <button class="btn btn-outline btn-sm" onclick="generateTradingDoc()" style="color:#B898FF;border-color:#352D45;">로직 문서 생성</button>
+    <button class="btn btn-outline btn-sm" onclick="viewTradingDoc()" style="color:#B898FF;border-color:#352D45;">문서 보기</button>
+  </div>
+  <h4 style="margin:0 0 12px;color:#C8C2BC;font-size:13px;">데이터 관리</h4>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;">
+    <button class="btn btn-outline btn-sm" onclick="clearPending()" style="color:#f5c842;border-color:#3A3820;">대기 주문 초기화</button>
+    <button class="btn btn-outline btn-sm" onclick="clearTrades()" style="color:#ef5350;border-color:#3A2020;">거래 내역 초기화</button>
+    <button class="btn btn-outline btn-sm" onclick="clearOhlcvCache()" style="color:#ff9800;border-color:#3A3020;">OHLCV 캐시 초기화</button>
+    <button class="btn btn-outline btn-sm" onclick="restoreBackup()" style="color:#4a9eff;border-color:#1A2A40;">백업 복원</button>
+  </div>
+  <div style="font-size:11px;color:#5A5450;margin-top:8px;">파괴적 작업 전 자동으로 data/state.backup.json에 백업됩니다.</div>
+</div>
+
+<!-- 탭 -->
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('positions')" title="현재 보유 중인 포지션 목록">보유 포지션 <span id="tabBadgePos" style="font-size:11px;color:#4a9eff;"></span></button>
+  <button class="tab" onclick="switchTab('pending')" title="시그널 발생 후 체결 대기 중인 지정가 주문">대기 주문 <span id="tabBadgePend" style="font-size:11px;color:#f5c842;"></span></button>
+  <button class="tab" onclick="switchTab('orderlog')" title="매수/매도/취소 체결 이력">체결 내역 <span id="tabBadgeLog" style="font-size:11px;color:#ff9800;"></span></button>
+  <button class="tab" onclick="switchTab('history')" title="완료된 거래 (익절/손절) 전체 내역">거래 내역</button>
+  <button class="tab" onclick="switchTab('stats')" title="승률, 평균 수익률, 누적 곡선 등 통계">통계</button>
+  <button class="tab" onclick="switchTab('backtest')" style="color:#A070FF;" title="종목별 백테스트 시뮬레이션 + 자동 최적화">백테스트</button>
+  <button class="tab" onclick="switchTab('top30')" style="color:#f5c842;" title="세력추종 로직 적합도 기준 전 종목 랭킹">Top 30</button>
+  <button class="tab" onclick="switchTab('stoploss')" style="color:#ef5350;" title="손절 발생 거래 AI 분석 + 파라미터 재최적화">손절 분석</button>
+  <button class="tab" onclick="switchTab('account')" style="color:#4a9eff;" title="KIS 실제 계좌 잔고, 보유종목, 주문 실행">실제 계좌</button>
+</div>
+
+<!-- 보유 포지션 -->
+<div id="tab-positions">
+  <div class="table-wrap"><table><thead><tr>
+    <th>종목<span class="help-tip">?<span class="ht-text">종목명과 종목코드</span></span></th>
+    <th>프로필<span class="help-tip">?<span class="ht-text">매매 전략 프로필<br>default=중소형 성장주<br>large_cap=대형 우량주<br>force_following=세력추종</span></span></th>
+    <th>매수일<span class="help-tip">?<span class="ht-text">지정가 주문이 체결된 날짜</span></span></th>
+    <th>매수가<span class="help-tip">?<span class="ht-text">실제 체결(매수) 가격</span></span></th>
+    <th>현재가<span class="help-tip">?<span class="ht-text">실시간 가격<br>"현재가 갱신" 버튼으로 업데이트</span></span></th>
+    <th>수익률<span class="help-tip">?<span class="ht-text">(현재가-매수가)÷매수가×100<br>수수료/세금 미포함</span></span></th>
+    <th>목표가<span class="help-tip">?<span class="ht-text">이 가격 도달 시 익절 매도<br>매수 시 차트 분석으로 결정<br>120일전고→52일전고→BB상단→ATR×3→고정%</span></span></th>
+    <th>손절가<span class="help-tip">?<span class="ht-text">이 가격 이하 시 손절 매도<br>매수 시 차트 분석으로 결정<br>기준선-3% vs ATR×2 vs 고정% 중 높은쪽</span></span></th>
+    <th>보유일<span class="help-tip">?<span class="ht-text">매수일~오늘 경과일수</span></span></th>
+    <th style="width:40px"></th>
+  </tr></thead><tbody id="posTbody"></tbody></table></div>
+</div>
+
+<!-- 대기 주문 -->
+<div id="tab-pending" style="display:none">
+  <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+    <button class="btn btn-outline btn-sm" style="color:#ef5350;border-color:#3A2020;font-size:11px;" onclick="clearAllPending()">전체 삭제</button>
+  </div>
+  <div class="table-wrap"><table><thead><tr>
+    <th>종목<span class="help-tip">?<span class="ht-text">종목명, 코드, Top30 출처 여부</span></span></th>
+    <th>프로필<span class="help-tip">?<span class="ht-text">매매 전략 프로필<br>default=중소형 성장주<br>large_cap=대형 우량주<br>force_following=세력추종</span></span></th>
+    <th>신호일<span class="help-tip">?<span class="ht-text">매수 시그널이 발생한 날짜</span></span></th>
+    <th>종합점수<span class="help-tip">?<span class="ht-text">5개 요소 종합 점수 (100점 만점)<br>시그널(40)+RSI(20)+추세(15)+세력(15)+변동성(10)</span></span></th>
+    <th>지정매수가<span class="help-tip">?<span class="ht-text">이 가격 이하로 내려오면 매수 체결<br>기준선→MA20→종가 우선순위로 결정</span></span></th>
+    <th>진입사유<span class="help-tip">?<span class="ht-text">진입가 결정 근거 + Top30 추천 사유<br>예: 기준선매수 | RSI 84 | MA정배열</span></span></th>
+    <th>대기일<span class="help-tip">?<span class="ht-text">시그널 발생 후 체결을 기다린 일수</span></span></th>
+    <th id="thPendTp" style="cursor:pointer" onclick="togglePendingSort('tp')">목표가<span class="help-tip">?<span class="ht-text">이 가격에 도달하면 익절 매도<br>120일전고→52일전고→BB상단→ATR×3→고정%<br>클릭하면 정렬</span></span></th>
+    <th>손절가<span class="help-tip">?<span class="ht-text">이 가격 이하면 손절 매도<br>기준선-3% vs ATR×2 vs 고정% 중 높은 쪽<br>마우스 올리면 산출 근거 확인</span></span></th>
+    <th style="width:40px"></th>
+  </tr></thead><tbody id="pendTbody"></tbody></table></div>
+</div>
+
+<!-- 체결 내역 -->
+<div id="tab-orderlog" style="display:none">
+  <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+    <button class="btn btn-outline btn-sm" style="color:#ef5350;border-color:#3A2020;font-size:11px;" onclick="clearOrderLog()">전체 삭제</button>
+  </div>
+  <div class="table-wrap"><table><thead><tr>
+    <th>날짜<span class="help-tip">?<span class="ht-text">이벤트 발생 날짜</span></span></th>
+    <th>종목</th>
+    <th>이벤트<span class="help-tip">?<span class="ht-text">매수 체결, 익절 매도, 손절 매도 등<br>주문의 실행 결과</span></span></th>
+    <th>체결가<span class="help-tip">?<span class="ht-text">실제 거래가 이루어진 가격<br>매수 시 지정가, 매도 시 목표/손절가</span></span></th>
+    <th>수량</th>
+    <th>손익<span class="help-tip">?<span class="ht-text">해당 거래의 실현 손익<br>매도 시에만 표시됨</span></span></th>
+  </tr></thead><tbody id="orderLogTbody"></tbody></table></div>
+</div>
+
+<!-- 거래 내역 -->
+<div id="tab-history" style="display:none">
+  <div class="table-wrap"><table><thead><tr>
+    <th>종목</th>
+    <th>사유<span class="help-tip">?<span class="ht-text">매도 사유<br>익절=목표가 도달<br>손절=손절가 이탈<br>타임아웃=보유기간 초과</span></span></th>
+    <th>매수일</th><th>매도일</th><th>매수가</th><th>매도가</th>
+    <th>수익률<span class="help-tip">?<span class="ht-text">(매도가-매수가)÷매수가×100<br>수수료/세금 미포함</span></span></th>
+    <th>손익<span class="help-tip">?<span class="ht-text">실현 손익 금액 (원)<br>수량×(매도가-매수가)</span></span></th>
+  </tr></thead><tbody id="histTbody"></tbody></table></div>
+</div>
+
+<!-- 통계 -->
+<div id="tab-stats" style="display:none">
+  <div class="stats-grid" id="statsGrid"></div>
+  <canvas id="tradeCurve"></canvas>
+  <p style="font-size:11px; color:#5A5450; margin-top:8px;">* 거래별 누적 손익 (완료 거래 기준)</p>
+</div>
+
+<!-- 백테스트 -->
+<div id="tab-backtest" style="display:none">
+
+  <!-- 1. 종목 선택 + 기본 설정 -->
+  <div class="bt-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="margin:0;border:0;padding:0;">백테스트 시뮬레이터</h3>
+      <span style="font-size:11px;color:#5A5450;">signal-engine V2 (Python 검증 완료)</span>
+    </div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:11px;color:#7A7470;margin-bottom:5px;">종목 검색</div>
+      <div style="position:relative;display:flex;gap:8px;">
+        <div style="position:relative;flex:1;">
+          <input id="btSearchInput" type="text" placeholder="삼성전자 또는 005930" autocomplete="off"
+            style="width:100%;background:#252320;border:1px solid #3A3733;color:#E8E2DC;padding:7px 10px;border-radius:6px;font-size:13px;"
+            oninput="btSearchFilter()" onfocus="btSearchFilter()" onblur="setTimeout(()=>document.getElementById('btSuggestions').style.display='none',200)">
+          <div id="btSuggestions" style="display:none;position:absolute;top:100%;left:0;right:0;background:#252320;border:1px solid #3A3733;border-radius:0 0 6px 6px;max-height:240px;overflow-y:auto;z-index:1000;"></div>
+        </div>
+        <button onclick="btSelectAll()" style="background:#2A2825;border:1px solid #3A3733;color:#C8C2BC;padding:7px 14px;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap;">KOSPI 전체</button>
+      </div>
+      <div id="btSelectedLabel" style="margin-top:5px;font-size:12px;color:#8050D0;min-height:18px;"></div>
+    </div>
+
+    <!-- 모드 토글 -->
+    <div class="bt-mode-toggle">
+      <button id="btModeManual" onclick="btSetMode('manual')">수동 설정</button>
+      <button id="btModeAuto" class="active" onclick="btSetMode('auto')">자동 최적화 (권장)</button>
+    </div>
+    <div id="btAutoInfo" style="background:#191816;border:1px solid #3A3820;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#9A9390;line-height:1.6;">
+      <strong style="color:#A070FF;">자동 최적화 모드</strong> — 종목 선택 후 분석 시 6개 파라미터 조합을 그리드서치하여 최적값을 자동 적용합니다.
+      <span style="color:#666;">수동으로 바꾸려면 "수동 설정"을 선택하세요.</span>
+    </div>
+    <!-- 자동 최적화 결과 배너 -->
+    <div id="btRecommendBanner" style="display:none;background:#191816;border:1px solid #352D45;border-radius:10px;padding:16px 20px;margin-bottom:14px;"></div>
+
+    <!-- 파라미터 설정 -->
+    <div id="btParamsSection" class="bt-params" style="opacity:0.3;pointer-events:none;">
+      <div class="bt-param">
+        <label>종목 유형<span class="help-tip">?<span class="ht-text">auto=시총 기반 자동 선택<br>일반=중소형 성장주<br>대형=우량주<br>세력=세력추종 전략</span></span></label>
+        <select id="btProfile">
+          <option value="auto" selected>auto (시총 기반)</option>
+          <option value="default">일반 (중소형주)</option>
+          <option value="large_cap">대형 우량주</option>
+          <option value="force_following">세력 추종형</option>
+        </select>
+      </div>
+      <div class="bt-param">
+        <label>익절 기준 (%)<span class="help-tip">?<span class="ht-text">매수가 대비 이 % 상승 시 매도<br>높으면 큰 수익 기대, 체결률 감소<br>낮으면 잦은 익절, 큰 수익 놓침</span></span></label>
+        <input type="number" id="btTP" value="17" min="1" max="100" step="1">
+      </div>
+      <div class="bt-param">
+        <label>손절 기준 (%)<span class="help-tip">?<span class="ht-text">매수가 대비 이 % 하락 시 매도<br>낮으면 빠른 손절 (위험 제한)<br>높으면 반등 기회 부여</span></span></label>
+        <input type="number" id="btSL" value="7" min="1" max="50" step="1">
+      </div>
+      <div class="bt-param">
+        <label>쿨다운 (일)<span class="help-tip">?<span class="ht-text">매도 후 같은 종목 재매수까지<br>대기해야 하는 최소 일수<br>짧으면 빈번한 재진입 가능</span></span></label>
+        <input type="number" id="btCD" value="3" min="1" max="30" step="1">
+      </div>
+      <div class="bt-param">
+        <label>매수 임계값<span class="help-tip">?<span class="ht-text">V2 시그널 점수 (15점 만점)<br>이 값 이상이어야 매수 시그널 발생<br>높이면 엄격, 낮추면 관대</span></span></label>
+        <input type="number" id="btThreshold" value="4.5" step="0.5" min="2" max="15">
+      </div>
+      <div class="bt-param">
+        <label>분석 기간<span class="help-tip">?<span class="ht-text">백테스트할 과거 데이터 범위<br>긴 기간 = 더 많은 거래 샘플<br>짧은 기간 = 최근 시장 반영</span></span></label>
+        <select id="btPeriod">
+          <option value="365" selected>최근 1년</option><option value="730">최근 2년</option><option value="1095">최근 3년</option><option value="1825">최근 5년</option><option value="0">전체</option>
+        </select>
+      </div>
+      <div class="bt-param">
+        <label>RSI 최소값<span class="help-tip">?<span class="ht-text">RSI가 이 값 이상일 때만 매수<br>70 권장 (검증 결과 승률 2.2배↑)<br>0으로 설정하면 RSI 필터 비활성화</span></span></label>
+        <input type="number" id="btRsiMin" value="70" step="5" min="0" max="100">
+      </div>
+      <div class="bt-param">
+        <label>벤포드 윈도우 (일)<span class="help-tip">?<span class="ht-text">벤포드 법칙 분석 기간 (일)<br>이 기간의 가격/거래량 패턴으로<br>세력 매집 여부 판별</span></span></label>
+        <input type="number" id="btBenfordWindow" value="30" min="10" max="60" step="5">
+      </div>
+      <div class="bt-param">
+        <label>벤포드 영향도 (%)<span class="help-tip">?<span class="ht-text">세력 감지 시 매수 점수 가산 비율<br>높이면 세력 감지가 점수에 크게 반영<br>0이면 벤포드 분석 비활성화</span></span></label>
+        <input type="number" id="btBenfordInfluence" value="15" min="0" max="30" step="5">
+      </div>
+      <div class="bt-param">
+        <label>세력 최소 감지횟수<span class="help-tip">?<span class="ht-text">벤포드 이상 패턴이 이 횟수 이상<br>감지되어야 세력으로 판정<br>높이면 엄격한 세력 판정</span></span></label>
+        <input type="number" id="btBenfordMinHits" value="3" min="1" max="15" step="1">
+      </div>
+      <div class="bt-param">
+        <label>거래 수량 (주)<span class="help-tip">?<span class="ht-text">1회 매수 시 거래할 주식 수량<br>수익금 계산에 사용</span></span></label>
+        <input type="number" id="btQty" value="10" min="1" max="10000" step="1">
+      </div>
+      <div class="bt-param">
+        <label>수수료 (%)<span class="help-tip">?<span class="ht-text">증권사 매매 수수료율<br>매수/매도 각각 적용<br>MTS 기준 약 0.015%</span></span></label>
+        <input type="number" id="btCommission" value="0.015" min="0" max="1" step="0.005">
+      </div>
+      <div class="bt-param">
+        <label>매도세 (%)<span class="help-tip">?<span class="ht-text">주식 매도 시 부과되는 세금<br>코스피 0.18%, 코스닥 0.18%<br>2026년 기준</span></span></label>
+        <input type="number" id="btTax" value="0.18" min="0" max="1" step="0.01">
+      </div>
+      <div class="bt-param">
+        <label>보유일 제한<span class="help-tip">?<span class="ht-text">이 일수 경과 시 강제 매도<br>0 = 제한 없음 (TP/SL까지 보유)<br>단기 매매 시 설정 권장</span></span></label>
+        <input type="number" id="btMaxHold" value="0" min="0" max="365" step="1">
+      </div>
+    </div>
+
+    <!-- 실행 버튼 -->
+    <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+      <button class="btn btn-primary" id="btRunBtn" onclick="runBacktest()" style="white-space:nowrap;background:linear-gradient(135deg,#8050D0,#6030B0);" title="선택한 종목/기간으로 백테스트 실행. 자동 모드 시 최적 파라미터를 자동 탐색합니다.">분석 시작</button>
+      <span id="btRunStatus" style="font-size:12px;color:#5A5450;"></span>
+    </div>
+    <div id="btProgressWrap" style="display:none;margin-top:12px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#7A7470;margin-bottom:5px;">
+        <span id="btProgressLabel">분석 중...</span><span id="btProgressCount">0 / 0</span>
+      </div>
+      <div style="background:#252320;border-radius:4px;height:5px;overflow:hidden;">
+        <div id="btProgressFill" style="height:100%;background:#8050D0;border-radius:4px;transition:width .2s;width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. 오늘의 신호 강도 (단일 종목 선택 시) -->
+  <div class="bt-signal-card" id="btSignalCard" style="display:none;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <h3 style="margin:0;font-size:14px;font-weight:700;color:#B898FF;">오늘의 신호 강도
+        <span id="btSignalDate" style="font-size:12px;color:#5A5450;font-weight:normal;margin-left:8px;"></span>
+      </h3>
+      <div id="btSignalRegime" style="display:none;padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;"></div>
+    </div>
+    <div id="btSignalStatus" class="bt-signal-status"></div>
+    <div style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:baseline;">
+      <span style="font-size:12px;color:#7A7470;">종합 신호 강도</span>
+      <span id="btSignalScore" style="font-size:28px;font-weight:800;color:#E8E2DC;line-height:1;">-</span>
+    </div>
+    <div class="bt-sbar-wrap">
+      <div id="btSignalBar" class="bt-sbar-fill" style="width:0%;"></div>
+      <div id="btSignalThresh" class="bt-sbar-thresh"></div>
+      <div id="btSignalThreshLbl" class="bt-sbar-thresh-lbl"></div>
+    </div>
+    <div id="btCompBars"></div>
+    <div id="btSignalTags" class="bt-signal-tags"></div>
+  </div>
+
+  <!-- 3. 분석 결과 -->
+  <div id="btSummary" style="display:none;">
+
+    <!-- 3-1. 통계 (6x2 = 12박스) -->
+    <div class="bt-stats-grid" id="btStatsGrid"></div>
+
+    <!-- 3-2. 캔들스틱 차트 -->
+    <div class="bt-card" id="btChartCard" style="display:none;">
+      <h3>차트</h3>
+      <div class="bt-legend">
+        <span><span class="dot" style="background:#ef5350"></span> 양봉</span>
+        <span><span class="dot" style="background:#26a69a"></span> 음봉</span>
+        <span><span class="dot" style="background:#f5c842"></span> MA5</span>
+        <span><span class="dot" style="background:#2196f3"></span> MA20</span>
+        <span><span class="dot" style="background:#e040fb"></span> MA60</span>
+        <span>&#x25B2; 매수 &nbsp; &#x25BC; 매도</span>
+      </div>
+      <div class="bt-chart-container" id="btChartContainer"></div>
+      <div class="bt-volume-container" id="btVolumeContainer"></div>
+      <div class="bt-chart-controls">
+        <button class="btn btn-sm btn-outline" id="btBtnShowAll" onclick="btShowAllMarkers()">전체 마커 표시</button>
+        <button class="btn btn-sm btn-outline" onclick="btClearChart()">차트 초기화</button>
+        <span style="font-size:11px;color:#5A5450;margin-left:6px;">거래 행 클릭 시 해당 구간으로 이동</span>
+      </div>
+    </div>
+
+    <!-- 3-3. 종목별 성과 -->
+    <div class="bt-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:12px;color:#7A7470;">종목별 성과</div>
+        <span id="btStockCount" style="font-size:11px;color:#5A5450;"></span>
+      </div>
+      <div class="table-wrap"><table><thead><tr>
+        <th>종목</th>
+        <th>거래<span class="help-tip">?<span class="ht-text">해당 종목의 총 거래 횟수</span></span></th>
+        <th>승률<span class="help-tip">?<span class="ht-text">수익 거래 ÷ 전체 거래 × 100</span></span></th>
+        <th>총손익<span class="help-tip">?<span class="ht-text">해당 종목 전체 거래 합산 손익</span></span></th>
+        <th>평균수익률<span class="help-tip">?<span class="ht-text">거래당 평균 수익률 (%)</span></span></th>
+        <th>최대손실<span class="help-tip">?<span class="ht-text">단일 거래 기준 최대 손실률</span></span></th>
+      </tr></thead>
+      <tbody id="btStockTbody"></tbody></table></div>
+    </div>
+
+    <!-- 3-4. 거래 상세 내역 -->
+    <div class="bt-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:12px;color:#7A7470;">거래 상세 내역 (<span id="btTradeCount">0</span>건)</div>
+        <button class="btn btn-outline btn-sm" onclick="toggleBtTrades()" id="btTradesToggle">펼치기</button>
+      </div>
+      <div id="btTradesWrap" style="display:none;">
+        <div style="max-height:500px;overflow:auto;border-radius:8px;border:1px solid #252320;">
+          <table class="bt-trade-table" id="btTradeTable">
+            <thead><tr>
+              <th>#</th>
+              <th>결과<span class="help-tip">?<span class="ht-text">익절=목표가 도달 매도<br>손절=손절가 이탈 매도</span></span></th>
+              <th>종목</th>
+              <th style="color:#B898FF;">시그널일<span class="help-tip">?<span class="ht-text">매수 시그널이 발생한 날짜<br>이후 지정가 대기 시작</span></span></th>
+              <th>체결일<span class="help-tip">?<span class="ht-text">지정가에 체결된 날짜<br>실제 매수가 이루어진 시점</span></span></th>
+              <th>매수가</th>
+              <th>수량</th>
+              <th>투자금<span class="help-tip">?<span class="ht-text">매수가 × 수량<br>해당 거래에 투입된 금액</span></span></th>
+              <th>매도일</th><th>매도가</th>
+              <th>수익률<span class="help-tip">?<span class="ht-text">(매도가-매수가)÷매수가×100<br>수수료/세금 별도</span></span></th>
+              <th>수익금<span class="help-tip">?<span class="ht-text">실현 수익 금액 (원)<br>수량×(매도가-매수가)-수수료-세금</span></span></th>
+              <th>보유일</th>
+              <th>스코어<span class="help-tip">?<span class="ht-text">매수 시점의 시그널 점수<br>V2 엔진 기준 (15점 만점)</span></span></th>
+              <th style="text-align:center">근거<span class="help-tip">?<span class="ht-text">매수 결정의 상세 근거<br>클릭하면 팝업으로 확인</span></span></th>
+            </tr></thead>
+            <tbody id="btTradeTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3-5. 누적 손익 곡선 -->
+    <div class="bt-card">
+      <div style="font-size:12px;color:#7A7470;margin-bottom:8px;">누적 손익 곡선</div>
+      <canvas id="btCurve" style="width:100%;height:180px;background:#141413;border-radius:6px;"></canvas>
+    </div>
+  </div>
+
+  <div id="btEmpty" style="text-align:center;padding:50px 20px;color:#5A5450;">
+    <div style="font-size:32px;margin-bottom:12px;">&#x1F4CA;</div>
+    <div>종목과 기간을 선택하고 "분석 시작"을 누르세요</div>
+    <div style="font-size:12px;margin-top:6px;">Python 백테스터와 100% 검증된 V2 로직이 적용됩니다</div>
+  </div>
+</div>
+
+<!-- Top 30 추천 -->
+<div id="tab-top30" style="display:none">
+  <div class="bt-card" style="border-color:#3A3820;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="margin:0;border:0;padding:0;color:#f5c842;">Top 30 종목 추천 <span style="font-size:12px;color:#7A7470;font-weight:normal;">세력추종 로직 적합도</span></h3>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn btn-primary btn-sm" onclick="startRanking()" id="rankingStartBtn" style="background:linear-gradient(135deg,#D4A020,#B08010);">전체 스캔 시작</button>
+        <span id="rankingStatus" style="font-size:11px;color:#5A5450;"></span>
+      </div>
+    </div>
+    <!-- 프로그레스 -->
+    <div id="rankingProgressWrap" style="display:none;margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#7A7470;margin-bottom:4px;">
+        <span id="rankingProgressLabel">전 종목 분석 중...</span>
+        <span id="rankingProgressCount">0 / 0</span>
+        <span id="rankingEta"></span>
+      </div>
+      <div style="background:#252320;border-radius:4px;height:6px;overflow:hidden;">
+        <div id="rankingProgressFill" style="height:100%;background:linear-gradient(90deg,#D4A020,#f5c842);border-radius:4px;transition:width .3s;width:0%"></div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#5A5450;margin-bottom:12px;">
+      전체 ~3,500개 종목을 스캔하여 세력추종 전략에 가장 적합한 종목을 선별합니다. (15~20분 소요)
+    </div>
+    <!-- 결과 테이블 -->
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>#</th>
+        <th>판정<span class="help-tip">?<span class="ht-text">투자 적합 여부<br>RSI≥70 + 시그널 임계 이상 → 투자<br>그 외 → 관망</span></span></th>
+        <th>종목</th><th>코드</th>
+        <th>종합<span class="help-tip">?<span class="ht-text">5개 요소 종합 점수 (100점 만점)<br>시그널(40)+RSI(20)+추세(15)+세력(15)+변동성(10)</span></span></th>
+        <th>시그널<span class="help-tip">?<span class="ht-text">매수 시그널 강도 (15점 만점)<br>5개 필수조건 + 12개 채점 요소<br>높을수록 매수 신호가 강함</span></span></th>
+        <th>RSI<span class="help-tip">?<span class="ht-text">상대강도지수 (0~100)<br>70 이상 = 강한 상승 모멘텀<br>≥70이어야 투자 적합 판정</span></span></th>
+        <th>추세<span class="help-tip">?<span class="ht-text">추세 건전성 (15점 만점)<br>MA 정배열(8)+구름위(4)+기준선위(3)<br>높을수록 상승 추세가 탄탄</span></span></th>
+        <th>세력<span class="help-tip">?<span class="ht-text">세력 감지 — 벤포드 분석 (15점 만점)<br>가격/거래량 패턴 이상 탐지<br>높을수록 기관/세력 매집 가능성↑</span></span></th>
+        <th>변동성<span class="help-tip">?<span class="ht-text">변동성 적합도 (10점 만점)<br>ATR% 2~6%가 최적 (10점)<br>너무 낮거나 높으면 감점</span></span></th>
+        <th>프로필</th><th>현재가</th><th>선정 사유</th>
+      </tr></thead><tbody id="rankingTbody">
+        <tr><td colspan="13" style="text-align:center;color:#5A5450;padding:40px;">
+          "전체 스캔 시작"을 눌러주세요<br>
+          <span style="font-size:11px;">RSI≥70 + 시그널 임계 이상 → 투자 진행 / 그 외 → 관망</span>
+        </td></tr>
+      </tbody></table>
+    </div>
+    <div id="rankingFooter" style="display:none;margin-top:10px;display:flex;gap:8px;align-items:center;">
+      <button class="btn btn-outline btn-sm" onclick="emailTop30()" id="emailTop30Btn" style="display:none;">이메일 전송</button>
+      <button class="btn btn-sm" onclick="btVerifyTop30()" id="btVerifyTop30Btn" style="display:none;background:linear-gradient(135deg,#8050D0,#6030B0);color:#fff;">백테스트 검증</button>
+      <span id="rankingTotal" style="font-size:11px;color:#5A5450;"></span>
+    </div>
+  </div>
+
+  <!-- 백테스트 검증 결과 -->
+  <div class="bt-card" id="btVerifyResultCard" style="display:none;border-color:#352D45;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h3 style="margin:0;border:0;padding:0;color:#B898FF;font-size:14px;">백테스트 검증 결과</h3>
+      <span id="btVerifyStatus" style="font-size:11px;color:#5A5450;"></span>
+    </div>
+    <div id="btVerifyProgressWrap" style="display:none;margin-bottom:10px;">
+      <div style="background:#252320;border-radius:4px;height:5px;overflow:hidden;">
+        <div id="btVerifyProgressFill" style="height:100%;background:#8050D0;border-radius:4px;transition:width .2s;width:0%"></div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>#</th>
+        <th>판정<span class="help-tip">?<span class="ht-text">백테스트 결과 기반 투자 판정<br>승률+EV 기준으로 자동 판정</span></span></th>
+        <th>종목</th><th>프로필</th>
+        <th>거래수<span class="help-tip">?<span class="ht-text">백테스트 기간 내 총 거래 횟수<br>5건 미만이면 신뢰도 낮음</span></span></th>
+        <th>승률<span class="help-tip">?<span class="ht-text">전체 거래 중 수익 거래 비율<br>50% 이상이면 양호</span></span></th>
+        <th>평균수익률<span class="help-tip">?<span class="ht-text">전체 거래의 평균 수익률 (%)<br>높을수록 좋음</span></span></th>
+        <th>EV<span class="help-tip">?<span class="ht-text">기대값 (Expected Value)<br>1회 거래당 기대 수익률<br>= 승률×평균이익 - 패률×평균손실<br>양수면 장기적으로 수익</span></span></th>
+        <th>TP%<span class="help-tip">?<span class="ht-text">익절 기준 (%)<br>매수가 대비 이 % 상승 시 매도<br>그리드서치로 최적값 자동 탐색</span></span></th>
+        <th>SL%<span class="help-tip">?<span class="ht-text">손절 기준 (%)<br>매수가 대비 이 % 하락 시 매도<br>그리드서치로 최적값 자동 탐색</span></span></th>
+        <th>CD<span class="help-tip">?<span class="ht-text">쿨다운 (일)<br>매도 후 같은 종목 재매수까지<br>대기해야 하는 최소 일수</span></span></th>
+        <th>추천사유</th>
+      </tr></thead><tbody id="btVerifyTbody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<!-- 손절 분석 -->
+<div id="tab-stoploss" style="display:none">
+  <div class="bt-card" style="border-color:#3A2020;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="margin:0;border:0;padding:0;color:#ef5350;">손절 분석 & 로직 개선</h3>
+      <div>
+        <button class="btn btn-outline btn-sm" onclick="analyzeAllStops()" id="analyzeAllStopsBtn" style="color:#ef5350;border-color:#3A2020;">전체 AI 분석</button>
+        <span id="stopAnalysisStatus" style="font-size:11px;color:#5A5450;margin-left:8px;"></span>
+      </div>
+    </div>
+
+    <!-- 손절 요약 -->
+    <div class="acct-bar" style="margin-bottom:16px;">
+      <div class="acct-item">
+        <div class="a-lbl">총 손절</div>
+        <div class="a-val" id="slTotal" style="color:#ef5350;">0건</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">평균 손실률</div>
+        <div class="a-val" id="slAvgLoss" style="color:#ef5350;">–</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">최대 손실</div>
+        <div class="a-val" id="slMaxLoss" style="color:#ef5350;">–</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">최근 5건 승률</div>
+        <div class="a-val" id="slRecent5">–</div>
+      </div>
+    </div>
+
+    <!-- 손절 목록 -->
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>종목</th><th>매수일</th><th>매도일</th><th>매수가</th><th>매도가</th><th>손실률</th><th>보유일</th><th>TP/SL</th><th>분석</th>
+      </tr></thead><tbody id="slTbody">
+        <tr><td colspan="9" style="text-align:center;color:#5A5450;padding:30px;">손절 내역이 없습니다</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+
+  <!-- AI 분석 결과 (개별) -->
+  <div class="bt-card" id="slAnalysisCard" style="display:none;border-color:#3A2020;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h3 style="margin:0;border:0;padding:0;font-size:14px;color:#ef5350;" id="slAnalysisTitle">AI 분석</h3>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('slAnalysisCard').style.display='none'">닫기</button>
+    </div>
+    <div id="slAnalysisContent" style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#C8C2BC;"></div>
+    <div id="slReoptResult" style="margin-top:12px;display:none;">
+      <h4 style="color:#B898FF;font-size:13px;margin:0 0 8px;">파라미터 재최적화 결과</h4>
+      <div id="slReoptContent"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 실제 계좌 -->
+<div id="tab-account" style="display:none">
+  <div class="bt-card" style="border-color:#1A2A40;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="margin:0;border:0;padding:0;color:#4a9eff;">실제 계좌 현황</h3>
+      <div>
+        <button class="btn btn-outline btn-sm" onclick="refreshAccount()" id="acctRefreshBtn">계좌 갱신</button>
+        <span id="acctStatus" style="font-size:11px;color:#5A5450;margin-left:8px;"></span>
+      </div>
+    </div>
+    <!-- 계좌 요약 -->
+    <div class="acct-bar" style="margin-bottom:16px;">
+      <div class="acct-item">
+        <div class="a-lbl">예수금 (가용)</div>
+        <div class="a-val" id="acctDeposit">–</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">총 평가금액</div>
+        <div class="a-val" id="acctEvalTotal">–</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">매입금액</div>
+        <div class="a-val" id="acctPurchase">–</div>
+      </div>
+      <div class="acct-item">
+        <div class="a-lbl">평가손익</div>
+        <div class="a-val" id="acctPnl">–</div>
+      </div>
+    </div>
+    <!-- 보유종목 -->
+    <div style="font-size:12px;color:#7A7470;margin-bottom:8px;">보유종목</div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>종목</th><th>코드</th><th>보유수량</th><th>매입평균</th><th>현재가</th><th>평가손익률</th><th>평가손익금</th><th>주문</th>
+      </tr></thead><tbody id="acctHoldingsTbody">
+        <tr><td colspan="8" style="text-align:center;color:#5A5450;padding:30px;">"계좌 갱신"을 눌러주세요</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+
+  <!-- 주문 패널 -->
+  <div class="bt-card" style="border-color:#1A2A40;">
+    <h3 style="margin:0 0 12px;border:0;padding:0;font-size:14px;color:#4a9eff;">수동 주문</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:10px;align-items:end;">
+      <div>
+        <label style="font-size:11px;color:#7A7470;">종목코드</label>
+        <input type="text" id="orderCode" placeholder="005930" style="width:100%;background:#252320;border:1px solid #3A3733;color:#E8E2DC;padding:6px 8px;border-radius:6px;font-size:13px;" maxlength="6">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#7A7470;">수량</label>
+        <input type="number" id="orderQty" value="1" min="1" style="width:100%;background:#252320;border:1px solid #3A3733;color:#E8E2DC;padding:6px 8px;border-radius:6px;font-size:13px;">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#7A7470;">가격 (시장가=0)</label>
+        <input type="number" id="orderPrice" value="0" min="0" style="width:100%;background:#252320;border:1px solid #3A3733;color:#E8E2DC;padding:6px 8px;border-radius:6px;font-size:13px;">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#7A7470;">주문유형</label>
+        <select id="orderType" style="width:100%;background:#252320;border:1px solid #3A3733;color:#E8E2DC;padding:6px 8px;border-radius:6px;font-size:13px;">
+          <option value="limit">지정가</option>
+          <option value="market">시장가</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-sm" style="background:#2962FF;color:#fff;white-space:nowrap;" onclick="submitOrder('buy')">매수</button>
+        <button class="btn btn-sm" style="background:#ef5350;color:#fff;white-space:nowrap;" onclick="submitOrder('sell')">매도</button>
+      </div>
+    </div>
+    <div id="orderResult" style="font-size:12px;margin-top:8px;min-height:18px;"></div>
+  </div>
+
+  <!-- 체결 내역 -->
+  <div class="bt-card" style="border-color:#1A2A40;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="font-size:12px;color:#7A7470;">오늘 체결 내역</div>
+      <button class="btn btn-outline btn-sm" onclick="refreshOrders()">조회</button>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>주문번호</th><th>종목</th><th>매수/매도</th><th>주문수량</th><th>체결수량</th><th>주문가</th><th>체결가</th><th>시간</th>
+      </tr></thead><tbody id="acctOrdersTbody">
+        <tr><td colspan="8" style="text-align:center;color:#5A5450;padding:20px;">조회를 눌러주세요</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+
+  <!-- 주문 로그 -->
+  <div class="bt-card" style="border-color:#1A2A40;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="font-size:12px;color:#7A7470;">주문 감사 로그 (최근 20건)</div>
+      <button class="btn btn-outline btn-sm" onclick="refreshOrderLog()">조회</button>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>시간</th><th>유형</th><th>종목</th><th>수량</th><th>가격</th><th>결과</th>
+      </tr></thead><tbody id="acctLogTbody">
+        <tr><td colspan="6" style="text-align:center;color:#5A5450;padding:20px;">조회를 눌러주세요</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<!-- 종목 상세 모달 -->
+<div class="stock-modal-backdrop" id="stockModalBackdrop" onclick="if(event.target===this)closeStockModal()">
+  <div class="stock-modal">
+    <div class="stock-modal-head">
+      <h3 id="stockModalTitle">종목 상세</h3>
+      <button class="close-btn" onclick="closeStockModal()">&#x2715;</button>
+    </div>
+    <div class="stock-modal-body" id="stockModalBody">
+      <div class="ai-loading">로딩 중...</div>
+    </div>
+  </div>
+</div>
+
+<!-- AI 손절 분석 모달 -->
+<div class="ai-modal-backdrop" id="aiModalBackdrop" onclick="if(event.target===this)closeAiModal()">
+  <div class="ai-modal">
+    <div class="ai-modal-head">
+      <h3>AI 손절 분석 <span id="aiModalTitle" style="color:#ef5350;font-weight:400;font-size:13px;"></span></h3>
+      <button class="close-btn" onclick="closeAiModal()">&#x2715;</button>
+    </div>
+    <div class="ai-modal-body">
+      <div id="aiTradeInfo" class="ai-trade-info"></div>
+      <div id="aiContent"><div class="ai-loading">Claude AI가 손절 원인을 분석 중...<div class="ai-spinner"></div></div></div>
+      <div id="aiSuggestions" class="ai-suggestions"></div>
+    </div>
+    <div class="ai-modal-foot">
+      <span id="aiAppliedMsg" style="font-size:12px;color:#4caf50;"></span>
+      <button class="btn btn-outline btn-sm" onclick="closeAiModal()">닫기</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<script src="signal-engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
