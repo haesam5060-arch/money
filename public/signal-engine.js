@@ -313,7 +313,7 @@ function calcBuyScoreV2(data, idx, profileName, benfordInfluence, benfordWindow,
     else                { score -= 1.0; details.rsi = `약세(${rsi.toFixed(0)})`; }
   }
 
-  // 2. MACD 상태 (최대 2.0점 캡)
+  // 2. MACD 상태 (검증: 히스토그램 음의 상관 → 캡 1.0으로 축소)
   let _macdScore = 0;
   if (row.macdHist != null && row.macdHist > 0) {
     _macdScore += 1.0;
@@ -331,40 +331,40 @@ function calcBuyScoreV2(data, idx, profileName, benfordInfluence, benfordWindow,
       details.macd = 'MACD골든크로스';
     }
   }
-  score += Math.min(_macdScore, 2.0);
+  score += Math.min(_macdScore, 1.0);
 
-  // 3. 20일 수익률 (프로필별 기준)
+  // 3. 20일 수익률 (검증: 미미한 기여도 → 축소)
   if (idx >= 20) {
     const price20ago = data[idx - 20].close;
     if (price20ago > 0) {
       const ret20d = (row.close - price20ago) / price20ago;
       if (ret20d > p.ret20d_strong) {
-        score += 1.5; details.ret20d = `+${(ret20d * 100).toFixed(0)}%`;
+        score += 0.5; details.ret20d = `+${(ret20d * 100).toFixed(0)}%`;
       } else if (ret20d > p.ret20d_mid) {
-        score += 1.0; details.ret20d = `+${(ret20d * 100).toFixed(0)}%`;
+        score += 0.3; details.ret20d = `+${(ret20d * 100).toFixed(0)}%`;
       } else if (ret20d > p.ret20d_weak) {
-        score += 0.5;
+        score += 0.2;
       }
     }
   }
 
-  // 4. 거래량 품질 (프로필별)
+  // 4. 거래량 품질 (검증: 높은 거래량 = 승률↓, 대폭 축소)
   if (row.volRatio != null) {
     if (profileName === 'force_following') {
       if (row.volRatio >= 3.0 && row.volRatio <= 7.0) {
-        score += 2.0; details.volume = `세력거래량(x${row.volRatio.toFixed(1)})`;
+        score += 0.5; details.volume = `세력거래량(x${row.volRatio.toFixed(1)})`;
       } else if (row.volRatio >= 1.5 && row.volRatio < 3.0) {
-        score += 1.0; details.volume = `증가거래량(x${row.volRatio.toFixed(1)})`;
+        score += 0.3; details.volume = `증가거래량(x${row.volRatio.toFixed(1)})`;
       } else if (row.volRatio > 7.0 && row.volRatio <= p.vol_overheat) {
-        score += 0.5; details.volume = `폭발거래량(x${row.volRatio.toFixed(1)})`;
+        score -= 0.5; details.volume = `폭발거래량(x${row.volRatio.toFixed(1)})`;
       }
     } else {
       if (row.volRatio >= 1.3 && row.volRatio <= 3.0) {
-        score += 1.0; details.volume = `건전거래량(x${row.volRatio.toFixed(1)})`;
+        score += 0.3; details.volume = `건전거래량(x${row.volRatio.toFixed(1)})`;
       } else if (row.volRatio > 3.0 && row.volRatio <= 5.0) {
-        score += 0.5; details.volume = `높은거래량(x${row.volRatio.toFixed(1)})`;
+        score += 0.0; details.volume = `높은거래량(x${row.volRatio.toFixed(1)})`;
       } else if (row.volRatio > 5.0 && row.volRatio <= p.vol_overheat) {
-        score -= 0.5; details.volume = `과열주의(x${row.volRatio.toFixed(1)})`;
+        score -= 1.0; details.volume = `과열주의(x${row.volRatio.toFixed(1)})`;
       }
     }
   }
@@ -381,8 +381,7 @@ function calcBuyScoreV2(data, idx, profileName, benfordInfluence, benfordWindow,
   if (consec >= 2 && consec <= 5) { score += 0.5; details.streak = `${consec}일연속↑`; }
   else if (consec > 5) { score -= 0.5; }
 
-  // 7. 볼린저밴드
-  if (row.bbMid != null && row.close > row.bbMid) score += 0.3;
+  // 7. 볼린저밴드 (검증: 변별력 없음 → 삭제)
 
   // 8. 20일 신고가
   if (row.close >= high20d * 0.99) {
@@ -395,7 +394,7 @@ function calcBuyScoreV2(data, idx, profileName, benfordInfluence, benfordWindow,
     if (ma60_20ago != null && ma60_20ago > 0) {
       const ma60Slope = (ma60 - ma60_20ago) / ma60_20ago;
       if (ma60Slope > 0.02) {
-        score += 1.0; details.long_trend = `MA60도상승(+${(ma60Slope * 100).toFixed(1)}%)`;
+        score += 1.5; details.long_trend = `MA60도상승(+${(ma60Slope * 100).toFixed(1)}%)`;
       }
     }
   }
@@ -410,13 +409,13 @@ function calcBuyScoreV2(data, idx, profileName, benfordInfluence, benfordWindow,
     }
   }
 
-  // 11. 일목균형표
+  // 11. 일목균형표 (검증: 구름위 = 회귀 기여도 1위 → 대폭 상향)
   const tenkan = row.ichiTenkan, kijun = row.ichiKijun;
   const cloudA = row.ichiCloudA, cloudB = row.ichiCloudB;
   if (tenkan != null && kijun != null && cloudA != null && cloudB != null) {
     const cloudTop = Math.max(cloudA, cloudB);
     const cloudBot = Math.min(cloudA, cloudB);
-    if (row.close > cloudTop) { score += 1.0; details.ichimoku = '구름위'; }
+    if (row.close > cloudTop) { score += 2.0; details.ichimoku = '구름위'; }
     else if (row.close < cloudBot) { score -= 0.5; details.ichimoku = '구름아래'; }
     if (tenkan > kijun) {
       score += 0.5;
@@ -785,12 +784,12 @@ function calcCompositeRankScore(data, idx, profileName, params) {
   composite += signalPts;
   if (buyScore >= 8) reasons.push(`시그널 ${buyScore.toFixed(1)}점`);
 
-  // ── 2. RSI 모멘텀 (20점 만점) ──────────────────────────────
+  // ── 2. RSI 모멘텀 (10점 만점 — buyScore에 이미 RSI 반영, 이중가산 축소) ──
   const rsi = d.rsi || 0;
   let rsiPts = 0;
-  if (rsi >= 80) rsiPts = 20;
-  else if (rsi >= 70) rsiPts = 15;
-  else if (rsi >= 60) rsiPts = 8;
+  if (rsi >= 80) rsiPts = 10;
+  else if (rsi >= 70) rsiPts = 7;
+  else if (rsi >= 60) rsiPts = 4;
   else rsiPts = 0;
   composite += rsiPts;
   if (rsi >= 70) reasons.push(`RSI ${rsi.toFixed(0)}`);
