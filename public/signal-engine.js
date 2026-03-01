@@ -863,6 +863,333 @@ function calcCompositeRankScore(data, idx, profileName, params) {
   };
 }
 
+// ============================================================
+// 매집 감지 (Accumulation Detection) — SDE 패턴 중심
+// ============================================================
+// 검증 결과 (194개 종목, 1,360건):
+//   SDE 패턴: 승률 57.9%, EV +3.01% (모멘텀 EV +0.75% 대비 4배)
+//   최적: TP=15%, SL=13%, MaxHold=20일
+// ============================================================
+
+const ACCUM_PROFILES = {
+  default: {
+    rsi_range: [20, 85],         // SDE 폭발일은 RSI 급등 가능 → 넓은 범위
+    max_price_change_5d: 0.15,   // SDE 폭발일 자체가 +5%+ → 완화 필요
+    vpd_threshold: 3.0,          // VPD 시그널 기준
+    vpd_strong: 5.0,             // VPD 강한 시그널
+    take_profit: 0.10,           // 그리드서치 최적: 58%WR, 50%TP율
+    stop_loss: 0.13,             // 검증 최적 SL
+    max_hold: 30,                // 그리드서치 최적: TO 23%
+    cooldown: 10,                // 쿨다운
+  },
+};
+
+/**
+ * VPD (Volume-Price Divergence) — 거래량-가격 괴리 지표
+ * VPD = volRatio / |일간등락률%|
+ * 높을수록 '거래량은 많은데 가격이 안 움직임' = 조용한 매집 의심
+ * 카카오페이 검증: VPD=6.2 → 17일 후 +30%
+ *
+ * requires calcIndicatorsV2() to have run first (needs volRatio)
+ */
+function calcVPD(data) {
+  for (let i = 0; i < data.length; i++) {
+    if (i < 1 || data[i].volRatio == null) {
+      data[i].vpd = null;
+      continue;
+    }
+    const pctChange = Math.max(
+      Math.abs((data[i].close - data[i - 1].close) / data[i - 1].close) * 100,
+      0.1  // floor 0.1% to avoid division by zero
+    );
+    const vr = data[i].volRatio;
+    if (vr < 0.5) {
+      data[i].vpd = 0;  // 저볼륨 제외 (의미 없음)
+      continue;
+    }
+    data[i].vpd = Math.min(vr / pctChange, 20.0);  // cap at 20
+  }
+  return data;
+}
+
+/**
+ * 세력 매집 3단계 패턴 감지 (Shakeout-Dryup-Explosion)
+ * Phase 1 (세이크아웃): 급락 -4% 이상 + 거래량 1.5배 이상
+ * Phase 2 (건조/매집): 이후 평균 거래량 < 1.0배 (공급 소화)
+ * Phase 3 (폭발): +5% 이상 + 거래량 2배 이상
+ *
+ * sdeSignal: 0 = 신호 없음, 3 = 풀 패턴 확인 (진입 시그널)
+ */
+/**
+ * SDE(Shakeout-Dryup-Explosion) 패턴 탐지
+ *
+ * 시그널 값:
+ *   0 = 패턴 없음
+ *   2 = 급락→건조기 진행 중 (매수 타이밍!)
+ *   3 = 급락→건조→폭발 완료 (너무 늦음, 추격매수 금지)
+ *
+ * 라이브 스캔에서는 signal=2만 매수 대상.
+ * signal=3은 이미 폭발한 종목 → 매수 불가.
+ */
+function detectSDE(data) {
+  const n = data.length;
+  for (let i = 0; i < n; i++) {
+    data[i].sdeSignal = 0;
+    data[i].sdeShakeoutDays = 0;
+  }
+  for (let i = 30; i < n; i++) {
+    const row = data[i];
+    const prev = data[i - 1];
+    if (prev.close <= 0) continue;
+
+    const dailyReturn = (row.close - prev.close) / prev.close;
+    const volRatioVal = row.volRatio != null ? row.volRatio : 1.0;
+    const isExplosion = (dailyReturn >= 0.05 && volRatioVal >= 2.0);
+
+    // 과거 5-30일 내 세이크아웃 탐색
+    for (let sOffset = 5; sOffset <= 30; sOffset++) {
+      const sIdx = i - sOffset;
+      if (sIdx < 1) break;
+      const sRow = data[sIdx];
+      const sPrev = data[sIdx - 1];
+      if (sPrev.close <= 0) continue;
+
+      const sReturn = (sRow.close - sPrev.close) / sPrev.close;
+      const sVol = sRow.volRatio != null ? sRow.volRatio : 1.0;
+
+      // Phase 1: 세이크아웃 확인 (-4% 이상 하락, 거래량 1.5배+)
+      if (sReturn <= -0.04 && sVol >= 1.5) {
+        // Phase 2: 세이크아웃~오늘 사이 건조도 확인 (오늘 제외)
+        const dryupStart = sIdx + 1;
+        const dryupEnd = i;  // 오늘 제외
+        if (dryupEnd - dryupStart < 3) continue;  // 최소 3일 건조기
+
+        let dryupSum = 0, dryupCnt = 0;
+        for (let d = dryupStart; d < dryupEnd; d++) {
+          const dv = data[d].volRatio;
+          if (dv != null) { dryupSum += dv; dryupCnt++; }
+        }
+        if (dryupCnt > 0 && (dryupSum / dryupCnt) < 1.0) {
+          if (isExplosion) {
+            // 오늘 폭발 → signal=3 (이미 터짐, 매수 금지)
+            data[i].sdeSignal = 3;
+          } else {
+            // 건조기 진행 중 → signal=2 (매수 타이밍!)
+            data[i].sdeSignal = 2;
+          }
+          data[i].sdeShakeoutDays = sOffset;
+          break;
+        }
+      }
+    }
+  }
+  return data;
+}
+
+/**
+ * 멀티윈도우 벤포드 분석 — 매집 감지용
+ * 여러 윈도우(5,7,10,15,30일)에서 동시에 chi² 계산.
+ * 장기(30d) + 단기(5-10d) 동시 이탈 = 매집 강력 신호.
+ *
+ * @returns {{ results: Object, alertLevel: number }}
+ *   alertLevel: 0(없음), 1(장기만), 2(장기+단기=강한 매집)
+ */
+function multiWindowBenford(volumes, windows) {
+  if (!windows) windows = [5, 7, 10, 15, 30];
+  const results = {};
+  for (const w of windows) {
+    if (volumes.length < w || volumes.length < 5) {
+      results[w] = 0;
+      continue;
+    }
+    const recent = volumes.slice(-w).filter(v => v > 0);
+    if (recent.length < 5) {
+      results[w] = 0;
+      continue;
+    }
+    results[w] = benfordChi2(recent);
+  }
+  const longAlert = (results[30] || 0) > 20;
+  const shortAlert = [5, 7, 10].some(w => (results[w] || 0) > 15);
+  let alertLevel = 0;
+  if (longAlert && shortAlert) alertLevel = 2;
+  else if (longAlert) alertLevel = 1;
+  return { results, alertLevel };
+}
+
+/**
+ * 매집 감지 시그널 스코어링 — SDE 패턴 중심
+ *
+ * 모멘텀(calcBuyScoreV2)과의 차이:
+ *   - RSI 20-85 (모멘텀은 70+)
+ *   - 정배열 불필요 (매집은 추세 형성 전)
+ *   - SDE 패턴이 핵심 게이트 (5점, 최대 기여)
+ *   - VPD/벤포드는 보조 확인 시그널
+ *
+ * 스코어링 (총 16점 만점):
+ *   SDE 패턴:       0~5점 (풀 패턴 = 5점)
+ *   VPD:            0~4점 (≥5.0 = 4점, ≥3.0 = 2.5점)
+ *   벤포드 멀티윈도우: 0~3점 (alert=2 = 3점)
+ *   거래량 압축:     0~2점 (10일간 vol 감소)
+ *   가격 기반 형성:  0~2점 (20일 레인지 < 8%)
+ *
+ * @returns {{ score: number, details: Object }}
+ */
+function calcAccumulationScore(data, idx, profileName) {
+  if (idx < 60) return { score: 0, details: {} };
+
+  const p = ACCUM_PROFILES[profileName] || ACCUM_PROFILES.default;
+  const row = data[idx];
+  const details = {};
+
+  // ── 필수 게이트 1: RSI 매집 구간 ──
+  const rsi = row.rsi;
+  if (rsi != null) {
+    if (rsi < p.rsi_range[0] || rsi > p.rsi_range[1]) {
+      return { score: 0, details: {} };
+    }
+  }
+
+  // ── 필수 게이트 2: 최근 5일 급변동 없음 ──
+  if (idx >= 5) {
+    const close5ago = data[idx - 5].close;
+    if (close5ago > 0) {
+      const ret5d = Math.abs((row.close - close5ago) / close5ago);
+      if (ret5d > p.max_price_change_5d) {
+        return { score: 0, details: {} };
+      }
+    }
+  }
+
+  // ── 필수 게이트 3: SDE 패턴 ──
+  // signal=2: 건조기 진행 중 (매수 타이밍)
+  // signal=3: 이미 폭발 완료 (추격매수 금지)
+  const sde = row.sdeSignal || 0;
+  if (sde === 3) return { score: 0, details: { sde: '이미 폭발 (매수 불가)' } };
+  if (sde !== 2) return { score: 0, details: {} };
+
+  // ── 필수 게이트 4: 건조기 품질 — 5일 레인지 & 저점 회복률 ──
+  // 데이터 검증 결과: 5일 레인지 <5% = EV 0%, 저점 회복 <3% = EV 0.85%
+  const shakeoutDays = row.sdeShakeoutDays || 0;
+  if (idx >= 5) {
+    let hi5 = 0, lo5 = Infinity;
+    for (let j = idx - 4; j <= idx; j++) {
+      if (data[j].high > hi5) hi5 = data[j].high;
+      if (data[j].low < lo5) lo5 = data[j].low;
+    }
+    const range5d = hi5 > 0 ? (hi5 - lo5) / ((hi5 + lo5) / 2) : 0;
+    if (range5d < 0.05) {
+      return { score: 0, details: { sde: `건조기 비활성 (5일레인지 ${(range5d*100).toFixed(1)}% < 5%)` } };
+    }
+  }
+  // 세이크아웃 저점 대비 회복률
+  const shakeIdx = idx - shakeoutDays;
+  if (shakeIdx >= 0 && shakeIdx < data.length) {
+    let shakeLow = Infinity;
+    for (let j = shakeIdx; j <= Math.min(shakeIdx + 3, idx); j++) {
+      if (data[j] && data[j].low < shakeLow) shakeLow = data[j].low;
+    }
+    const recovery = shakeLow > 0 ? (row.close - shakeLow) / shakeLow : 0;
+    if (recovery < 0.03) {
+      return { score: 0, details: { sde: `저점 미회복 (회복률 ${(recovery*100).toFixed(1)}% < 3%)` } };
+    }
+  }
+
+  // ── 스코어링 (건조기 품질 확인됨 — 폭발 대기 중) ──
+  let score = 5.0;
+  details.sde = `SDE ${shakeoutDays}일전급락→건조중 +5`;
+
+  // 2. VPD (0~4점) — 보조 확인
+  const vpdVal = row.vpd || 0;
+  if (vpdVal >= p.vpd_strong) {
+    score += 4.0;
+    details.vpd = `VPD ${vpdVal.toFixed(1)} 강한괴리 +4`;
+  } else if (vpdVal >= p.vpd_threshold) {
+    score += 2.5;
+    details.vpd = `VPD ${vpdVal.toFixed(1)} 괴리감지 +2.5`;
+  } else if (vpdVal >= 2.0) {
+    score += 1.0;
+    details.vpd = `VPD ${vpdVal.toFixed(1)} 약괴리 +1`;
+  } else {
+    details.vpd = `VPD ${vpdVal.toFixed(1)} 정상`;
+  }
+
+  // 3. 벤포드 멀티윈도우 (0~3점)
+  const vols = [];
+  for (let j = Math.max(0, idx - 30); j <= idx; j++) vols.push(data[j].volume);
+  const { alertLevel } = multiWindowBenford(vols);
+  if (alertLevel === 2) {
+    score += 3.0;
+    details.benford = '벤포드 강이탈 +3';
+  } else if (alertLevel === 1) {
+    score += 1.5;
+    details.benford = '벤포드 이탈 +1.5';
+  } else {
+    details.benford = '벤포드 정상';
+  }
+
+  // 4. 거래량 압축 (0~2점) — 공급 소화 확인
+  if (idx >= 10) {
+    const volAvg = row.volAvg;
+    if (volAvg != null && volAvg > 0) {
+      let recentVolSum = 0;
+      for (let j = idx - 9; j <= idx; j++) recentVolSum += data[j].volume;
+      const volRatio10d = (recentVolSum / 10) / volAvg;
+      if (volRatio10d < 0.6) {
+        score += 2.0;
+        details.vol_compress = `거래량 x${volRatio10d.toFixed(2)} 건조 +2`;
+      } else if (volRatio10d < 0.8) {
+        score += 1.0;
+        details.vol_compress = `거래량 x${volRatio10d.toFixed(2)} 감소 +1`;
+      } else {
+        details.vol_compress = `거래량 x${volRatio10d.toFixed(2)} 보통`;
+      }
+    } else {
+      details.vol_compress = '거래량 데이터없음';
+    }
+  }
+
+  // 5. 건조기 활력도 (0~2점) — 가격 활력 + 저점 회복
+  // 검증 결과: 5일 레인지 8%+ → EV +1.57%, 회복률 7%+ → EV +1.25%
+  if (idx >= 5) {
+    let hi5 = 0, lo5 = Infinity;
+    for (let j = idx - 4; j <= idx; j++) {
+      if (data[j].high > hi5) hi5 = data[j].high;
+      if (data[j].low < lo5) lo5 = data[j].low;
+    }
+    const range5d = hi5 > 0 ? (hi5 - lo5) / ((hi5 + lo5) / 2) : 0;
+    // 저점 회복률 다시 계산 (스코어링용)
+    const sIdxScore = idx - shakeoutDays;
+    let sLow = Infinity;
+    for (let j = sIdxScore; j <= Math.min(sIdxScore + 3, idx); j++) {
+      if (data[j] && data[j].low < sLow) sLow = data[j].low;
+    }
+    const recov = sLow > 0 ? (row.close - sLow) / sLow : 0;
+    if (range5d >= 0.08 && recov >= 0.07) {
+      score += 2.0;
+      details.base = `활력 우수 (5일${(range5d*100).toFixed(1)}% 회복${(recov*100).toFixed(0)}%) +2`;
+    } else if (range5d >= 0.05 && recov >= 0.03) {
+      score += 1.0;
+      details.base = `활력 양호 (5일${(range5d*100).toFixed(1)}% 회복${(recov*100).toFixed(0)}%) +1`;
+    } else {
+      details.base = `활력 보통 (5일${(range5d*100).toFixed(1)}% 회복${(recov*100).toFixed(0)}%)`;
+    }
+  }
+
+  return { score, details };
+}
+
+/**
+ * 매집 감지 지표 래퍼 — 기존 calcIndicatorsV2 + VPD + SDE
+ * calcIndicatorsV2는 수정 없이 그대로 호출 후, 추가 지표만 계산
+ */
+function calcAccumulationIndicators(data) {
+  calcIndicatorsV2(data);
+  calcVPD(data);
+  detectSDE(data);
+  return data;
+}
+
 // ── CommonJS export (서버에서 require 시 사용, 브라우저에서는 무시) ──
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -871,5 +1198,7 @@ if (typeof module !== 'undefined' && module.exports) {
     analyzeVolumeBenford, analyzePriceChangeBenford,
     calcCompositeRankScore, RegimeFilter, CircuitBreaker,
     calcTargetPrice, calcStopPrice, getTpReason, getSlReason, getEntryReason,
+    ACCUM_PROFILES, calcVPD, detectSDE, multiWindowBenford,
+    calcAccumulationScore, calcAccumulationIndicators,
   };
 }

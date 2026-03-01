@@ -940,34 +940,75 @@ app.post('/api/ranking/start', async (req, res) => {
           if (priceMin > 0 && lastClose < priceMin) continue;
           if (priceMax > 0 && lastClose > priceMax) continue;
           try {
-            signalEngine.calcIndicatorsV2(data);
-            const profileName = cfg.defaultProfile === 'auto'
-              ? serverAutoDetectProfile(data)
-              : (cfg.defaultProfile || 'default');
-            const result = signalEngine.calcCompositeRankScore(data, data.length - 1, profileName, {
-              threshold: cfg.threshold || 4.5,
-              benfordInfluence: cfg.benfordInfluence || 0.15,
-              benfordWindow: cfg.benfordWindow || 30,
-              benfordMinHits: cfg.benfordMinHits || 3,
-            });
-            if (result && result.composite > 0) {
-              const lastCandle = data[data.length - 1];
-              const { pendingLimit, tpLevel } = signalEngine.calcDynamicPrices(data, data.length - 1,
-                signalEngine.STOCK_PROFILES[profileName]?.take_profit || 0.17,
-                signalEngine.STOCK_PROFILES[profileName]?.stop_loss || 0.07);
-              rankings.push({
-                code, name, market, profileName,
-                ...result,
-                price: lastCandle.close,
-                entryPrice: pendingLimit || lastCandle.close,
-                tpLevel,
+            const scanMode = cfg.scanMode || 'momentum';
+            if (scanMode === 'accumulation') {
+              // ── 매집 모드: SDE 패턴 기반 스코어링 ──
+              signalEngine.calcAccumulationIndicators(data);
+              const accumResult = signalEngine.calcAccumulationScore(data, data.length - 1, 'default');
+              if (accumResult && accumResult.score > 0) {
+                const lastCandle = data[data.length - 1];
+                const ap = signalEngine.ACCUM_PROFILES.default;
+                // 확인 지표 수 계산 (점수 기여한 항목만 카운트)
+                const d = accumResult.details;
+                let confirmCount = 0;
+                if (d.sde && !d.sde.includes('불가')) confirmCount++;
+                if (d.vpd && !d.vpd.includes('정상')) confirmCount++;
+                if (d.benford && !d.benford.includes('정상')) confirmCount++;
+                if (d.vol_compress && !d.vol_compress.includes('보통') && !d.vol_compress.includes('데이터없음')) confirmCount++;
+                if (d.base && (d.base.includes('압축') || d.base.includes('좁음'))) confirmCount++;
+                rankings.push({
+                  code, name, market,
+                  profileName: 'accumulation',
+                  composite: accumResult.score,
+                  confirmCount,
+                  investable: accumResult.score >= (cfg.accumThreshold || 6.5),
+                  buyScore: accumResult.score,
+                  rsi: Math.round((lastCandle.rsi || 0) * 10) / 10,
+                  trendPts: 0, benfordPts: 0, volPts: 0,
+                  reason: `[${confirmCount}개 확인 ${accumResult.score}/16] ${Object.values(accumResult.details).join(' | ')}`,
+                  details: accumResult.details,
+                  price: lastCandle.close,
+                  entryPrice: lastCandle.close,
+                  tpLevel: lastCandle.close * (1 + ap.take_profit),
+                });
+              }
+            } else {
+              // ── 모멘텀 모드: 기존 로직 그대로 ──
+              signalEngine.calcIndicatorsV2(data);
+              const profileName = cfg.defaultProfile === 'auto'
+                ? serverAutoDetectProfile(data)
+                : (cfg.defaultProfile || 'default');
+              const result = signalEngine.calcCompositeRankScore(data, data.length - 1, profileName, {
+                threshold: cfg.threshold || 4.5,
+                benfordInfluence: cfg.benfordInfluence || 0.15,
+                benfordWindow: cfg.benfordWindow || 30,
+                benfordMinHits: cfg.benfordMinHits || 3,
               });
+              if (result && result.composite > 0) {
+                const lastCandle = data[data.length - 1];
+                const { pendingLimit, tpLevel } = signalEngine.calcDynamicPrices(data, data.length - 1,
+                  signalEngine.STOCK_PROFILES[profileName]?.take_profit || 0.17,
+                  signalEngine.STOCK_PROFILES[profileName]?.stop_loss || 0.07);
+                rankings.push({
+                  code, name, market, profileName,
+                  ...result,
+                  price: lastCandle.close,
+                  entryPrice: pendingLimit || lastCandle.close,
+                  tpLevel,
+                });
+              }
             }
           } catch(e) { /* 개별 오류 무시 */ }
         }
       }
 
-      rankings.sort((a, b) => b.composite - a.composite);
+      // 매집 모드: 1차=확인 지표 수, 2차=점수 / 모멘텀: 점수 순
+      rankings.sort((a, b) => {
+        if (a.confirmCount != null && b.confirmCount != null) {
+          if (b.confirmCount !== a.confirmCount) return b.confirmCount - a.confirmCount;
+        }
+        return b.composite - a.composite;
+      });
       _rankingJob.results = rankings.slice(0, 100); // 상위 100개 보관
       _rankingJob.status = 'done';
       console.log(`[RANKING] 완료: ${rankings.length}개 중 Top ${_rankingJob.results.length}개`);
@@ -1194,7 +1235,12 @@ app.post('/api/scan/start', async (req, res) => {
                 pos.entryPrice = fillPrice;
                 pos.entryDate = scanDate;
                 pos.targetPrice = Math.round(signalEngine.calcTargetPrice(fillPrice, pos.tpLevel, pos.tp));
-                pos.stopPrice = Math.round(signalEngine.calcStopPrice(fillPrice, fillKijun, pos.sl, fillAtr));
+                if (pos.profileName === 'accumulation') {
+                  // 매집 모드: 고정 SL만 사용 (추세 미형성, 기준선/ATR 무의미)
+                  pos.stopPrice = Math.round(fillPrice * (1 - (pos.sl || 0.13)));
+                } else {
+                  pos.stopPrice = Math.round(signalEngine.calcStopPrice(fillPrice, fillKijun, pos.sl, fillAtr));
+                }
                 pos.daysHeld = 0;
                 scanResults.push({ name, code, action: 'FILLED', price: fillPrice });
               } else {
@@ -1210,13 +1256,21 @@ app.post('/api/scan/start', async (req, res) => {
               pos.daysHeld = Math.ceil((new Date(scanDate) - new Date(pos.entryDate)) / 86400000);
 
               let exitReason = null, exitPrice = null;
-              const hitTarget = lastCandle.high >= pos.targetPrice;
-              const hitStop = lastCandle.low <= pos.stopPrice;
-              if (hitTarget && hitStop) {
-                if (lastCandle.open >= pos.targetPrice) { exitReason = 'TARGET'; exitPrice = pos.targetPrice; }
-                else { exitReason = 'STOP'; exitPrice = pos.stopPrice; }
-              } else if (hitTarget) { exitReason = 'TARGET'; exitPrice = pos.targetPrice; }
-              else if (hitStop) { exitReason = 'STOP'; exitPrice = pos.stopPrice; }
+              // 매집 모드: max_hold 초과 시 강제 청산
+              const maxHold = pos.maxHold || 0;
+              if (maxHold > 0 && pos.daysHeld >= maxHold) {
+                exitReason = 'TIMEOUT';
+                exitPrice = lastCandle.close;
+              }
+              if (!exitReason) {
+                const hitTarget = lastCandle.high >= pos.targetPrice;
+                const hitStop = lastCandle.low <= pos.stopPrice;
+                if (hitTarget && hitStop) {
+                  if (lastCandle.open >= pos.targetPrice) { exitReason = 'TARGET'; exitPrice = pos.targetPrice; }
+                  else { exitReason = 'STOP'; exitPrice = pos.stopPrice; }
+                } else if (hitTarget) { exitReason = 'TARGET'; exitPrice = pos.targetPrice; }
+                else if (hitStop) { exitReason = 'STOP'; exitPrice = pos.stopPrice; }
+              }
               if (exitReason) {
                 const grossReturn = (exitPrice - pos.entryPrice) / pos.entryPrice;
                 const pnlPct = Math.round((grossReturn - ROUND_TRIP_COST) * 10000) / 100;

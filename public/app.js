@@ -2,7 +2,7 @@
 // 상태 관리
 // ═══════════════════════════════════════════════════════════════
 let STATE = null;
-let CONFIG = { threshold: 4.5, rsiMin: 70, useRegimeFilter: true, useCircuitBreaker: true, defaultProfile: 'auto' };
+let CONFIG = { threshold: 4.5, rsiMin: 70, useRegimeFilter: true, useCircuitBreaker: true, defaultProfile: 'auto', scanMode: 'momentum', accumThreshold: 5.0 };
 let _stockListCache = [];
 let _livePrices = {};  // code → { price, changePct }
 const _regimeFilter = new RegimeFilter();
@@ -46,6 +46,17 @@ async function loadState() {
   document.getElementById('cfgEmailEnabled').value = CONFIG.emailEnabled ? '1' : '0';
   document.getElementById('hdrRsiMin').textContent = CONFIG.rsiMin || 70;
   document.getElementById('hdrProfile').textContent = `프로필: ${CONFIG.defaultProfile || 'auto'}`;
+  // 매집 모드 UI 반영
+  if (CONFIG.scanMode) {
+    const el = document.getElementById('cfgScanMode');
+    if (el) el.value = CONFIG.scanMode;
+  }
+  if (CONFIG.accumThreshold) {
+    const el = document.getElementById('cfgAccumThreshold');
+    if (el) el.value = CONFIG.accumThreshold;
+  }
+  const modeEl = document.getElementById('hdrScanMode');
+  if (modeEl) modeEl.textContent = `모드: ${CONFIG.scanMode || 'momentum'}`;
   renderAll();
   // 레짐 필터 로드
   _regimeFilter.load().then(() => updateRegimeBadge());
@@ -70,6 +81,8 @@ async function saveConfig() {
     benfordWindow: parseInt(document.getElementById('cfgBenfordWindow').value) || 30,
     benfordInfluence: (parseFloat(document.getElementById('cfgBenfordInfluence').value) || 15) / 100,
     benfordMinHits: parseInt(document.getElementById('cfgBenfordMinHits').value) || 3,
+    scanMode: document.getElementById('cfgScanMode')?.value || 'momentum',
+    accumThreshold: parseFloat(document.getElementById('cfgAccumThreshold')?.value) || 5.0,
     appKey: document.getElementById('cfgAppKey').value.trim(),
     appSecret: document.getElementById('cfgAppSecret').value.trim(),
     cano: document.getElementById('cfgCano').value.trim(),
@@ -81,6 +94,8 @@ async function saveConfig() {
   await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(CONFIG)});
   document.getElementById('hdrRsiMin').textContent = CONFIG.rsiMin;
   document.getElementById('hdrProfile').textContent = `프로필: ${CONFIG.defaultProfile}`;
+  const modeEl = document.getElementById('hdrScanMode');
+  if (modeEl) modeEl.textContent = `모드: ${CONFIG.scanMode}`;
   document.getElementById('scanStatus').textContent = '설정 저장됨';
   setTimeout(() => document.getElementById('scanStatus').textContent = '', 2000);
 }
@@ -617,37 +632,62 @@ async function createOrdersFromTop30() {
       const json = await resp.json();
       if (!json.ok || !json.data || json.data.length < 62) continue;
       const data = json.data;
-      calcIndicatorsV2(data);
+      const scanMode = CONFIG.scanMode || 'momentum';
       const idx = data.length - 1;
-      const row = data[idx];
-      const customTp = STATE.stockParams[stock.code]?.tp || profile.take_profit;
-      const customSl = STATE.stockParams[stock.code]?.sl || profile.stop_loss;
-      const { pendingLimit, tpLevel, kijunForSL, atrForSL } = calcDynamicPrices(data, idx, customTp, customSl);
-      const limitPrice = pendingLimit || row.close;
+      const row = data[data.length - 1];
 
-      // 진입사유: 차트 기반 + Top30 추천사유 통합
-      const baseReason = getEntryReason(pendingLimit, row);
-      const entryReason = stock.reason
-        ? `${baseReason} | ${stock.reason}`
-        : baseReason;
+      if (scanMode === 'accumulation') {
+        // ── 매집 모드: 종가 진입, 고정 TP/SL, max_hold ──
+        const ap = ACCUM_PROFILES.default;
+        const limitPrice = row.close;
+        const targetPrice = Math.round(limitPrice * (1 + ap.take_profit));
+        const stopPrice = Math.round(limitPrice * (1 - ap.stop_loss));
+        const entryReason = `종가매수(매집) | ${stock.reason || ''}`;
 
-      // 목표가/손절가를 대기주문 생성 시점에 미리 계산
-      const targetPrice = calcTargetPrice(limitPrice, tpLevel, customTp);
-      const stopPrice = calcStopPrice(limitPrice, kijunForSL, customSl, atrForSL);
-      const tpReason = getTpReason(tpLevel, limitPrice, customTp, data, idx);
-      const slReason = getSlReason(stopPrice, limitPrice, kijunForSL, customSl, atrForSL);
+        STATE.positions.push({
+          id: `${Date.now()}_${stock.code}`, code: stock.code, name: stock.name,
+          status: 'PENDING', signalDate: today,
+          signalScore: Math.round(stock.composite * 10) / 10,
+          limitPrice, entryReason, tpLevel: targetPrice, quantity: 1,
+          entryPrice: null, entryDate: null,
+          targetPrice, stopPrice,
+          tpReason: `고정TP +${(ap.take_profit*100).toFixed(0)}%`,
+          slReason: `고정SL -${(ap.stop_loss*100).toFixed(0)}%`,
+          tp: ap.take_profit, sl: ap.stop_loss,
+          profileName: 'accumulation', cooldownDays: ap.cooldown,
+          maxHold: ap.max_hold, timeoutDays: 0, daysHeld: 0,
+          fromTop30: true, investReason: stock.reason,
+        });
+      } else {
+        // ── 모멘텀 모드: 기존 로직 그대로 ──
+        calcIndicatorsV2(data);
+        const customTp = STATE.stockParams[stock.code]?.tp || profile.take_profit;
+        const customSl = STATE.stockParams[stock.code]?.sl || profile.stop_loss;
+        const { pendingLimit, tpLevel, kijunForSL, atrForSL } = calcDynamicPrices(data, idx, customTp, customSl);
+        const limitPrice = pendingLimit || row.close;
 
-      STATE.positions.push({
-        id: `${Date.now()}_${stock.code}`, code: stock.code, name: stock.name,
-        status: 'PENDING', signalDate: today,
-        signalScore: Math.round(stock.composite * 10) / 10,
-        limitPrice, entryReason, tpLevel, quantity: 1,
-        entryPrice: null, entryDate: null,
-        targetPrice, stopPrice, tpReason, slReason,
-        tp: customTp, sl: customSl,
-        profileName, cooldownDays: baseCooldown, timeoutDays: 0, daysHeld: 0,
-        fromTop30: true, investReason: stock.reason,
-      });
+        const baseReason = getEntryReason(pendingLimit, row);
+        const entryReason = stock.reason
+          ? `${baseReason} | ${stock.reason}`
+          : baseReason;
+
+        const targetPrice = calcTargetPrice(limitPrice, tpLevel, customTp);
+        const stopPrice = calcStopPrice(limitPrice, kijunForSL, customSl, atrForSL);
+        const tpReason = getTpReason(tpLevel, limitPrice, customTp, data, idx);
+        const slReason = getSlReason(stopPrice, limitPrice, kijunForSL, customSl, atrForSL);
+
+        STATE.positions.push({
+          id: `${Date.now()}_${stock.code}`, code: stock.code, name: stock.name,
+          status: 'PENDING', signalDate: today,
+          signalScore: Math.round(stock.composite * 10) / 10,
+          limitPrice, entryReason, tpLevel, quantity: 1,
+          entryPrice: null, entryDate: null,
+          targetPrice, stopPrice, tpReason, slReason,
+          tp: customTp, sl: customSl,
+          profileName, cooldownDays: baseCooldown, timeoutDays: 0, daysHeld: 0,
+          fromTop30: true, investReason: stock.reason,
+        });
+      }
       created++;
     } catch(e) { /* 개별 오류 무시 */ }
   }
@@ -1142,6 +1182,20 @@ function btSetMode(mode) {
   else { ps.style.opacity='1'; ps.style.pointerEvents='auto'; ai.style.display='none'; }
 }
 
+let _btStrategy = 'momentum';
+function btSetStrategy(mode) {
+  _btStrategy = mode;
+  const mBtn = document.getElementById('btStratMomentum');
+  const aBtn = document.getElementById('btStratAccum');
+  if (mode === 'accumulation') {
+    aBtn.style.background = '#1A3320'; aBtn.style.borderColor = '#4caf50'; aBtn.style.color = '#4caf50'; aBtn.style.fontWeight = '600';
+    mBtn.style.background = '#2A2825'; mBtn.style.borderColor = '#3A3733'; mBtn.style.color = '#7A7470'; mBtn.style.fontWeight = 'normal';
+  } else {
+    mBtn.style.background = '#352D45'; mBtn.style.borderColor = '#8050D0'; mBtn.style.color = '#B898FF'; mBtn.style.fontWeight = '600';
+    aBtn.style.background = '#2A2825'; aBtn.style.borderColor = '#3A3733'; aBtn.style.color = '#7A7470'; aBtn.style.fontWeight = 'normal';
+  }
+}
+
 btEnsureStockList();
 
 // ═══════════════════════════════════════════════════════════════
@@ -1586,6 +1640,8 @@ function btGetParams() {
     benfordInfluence: (parseFloat(document.getElementById('btBenfordInfluence').value)||15)/100,
     benfordWindow: parseInt(document.getElementById('btBenfordWindow').value)||30,
     benfordMinHits: parseInt(document.getElementById('btBenfordMinHits').value)||3,
+    scanMode: _btStrategy || 'momentum',
+    accumThreshold: CONFIG.accumThreshold || 5.0,
   };
 }
 
@@ -1668,17 +1724,21 @@ async function runBacktest() {
 
 function btSimulateV2(data, startIdx, params, name, code, profileName) {
   const trades = [];
-  const profile = STOCK_PROFILES[profileName] || STOCK_PROFILES.default;
+  const isAccum = (params.scanMode || CONFIG.scanMode) === 'accumulation';
+  const profile = isAccum ? ACCUM_PROFILES.default : (STOCK_PROFILES[profileName] || STOCK_PROFILES.default);
   // useProfile: auto 모드에서 multi-stock일 때 프로필 기본값 사용
   const useProfile = params._useProfile;
-  const tp = useProfile ? profile.take_profit : (params.tp || profile.take_profit);
-  const sl = useProfile ? profile.stop_loss : (params.sl || profile.stop_loss);
-  const cd = useProfile ? profile.cooldown : (params.cd || profile.cooldown);
-  const maxHold = params.maxHold || 0; // 0 = 무제한
+  const tp = isAccum ? profile.take_profit : (useProfile ? profile.take_profit : (params.tp || profile.take_profit));
+  const sl = isAccum ? profile.stop_loss : (useProfile ? profile.stop_loss : (params.sl || profile.stop_loss));
+  const cd = isAccum ? profile.cooldown : (useProfile ? profile.cooldown : (params.cd || profile.cooldown));
+  const maxHold = isAccum ? profile.max_hold : (params.maxHold || 0); // 매집: 20일, 모멘텀: 0=무제한
   const roundTrip = (params.commission||COMMISSION_RATE)*2 + (params.tax||SELL_TAX_RATE);
   let pending = null, position = null;
   let lastSignalIdx = -cd;
   let consecLosses = 0;
+  // 매집 모드: VPD, SDE 지표 미리 계산
+  if (isAccum) { calcAccumulationIndicators(data); }
+  else { /* 모멘텀: calcIndicatorsV2는 이미 호출됨 */ }
 
   for (let i = Math.max(60, startIdx - 10); i < data.length; i++) {
     const d = data[i];
@@ -1693,10 +1753,16 @@ function btSimulateV2(data, startIdx, params, name, code, profileName) {
       if (fillPrice != null) {
         const fillKijun = d.ichiKijun;
         const fillAtr = d.atr14 || null;
+        const tgtPrice = isAccum
+          ? Math.round(fillPrice * (1 + tp))    // 매집: 고정 TP
+          : Math.round(calcTargetPrice(fillPrice, pending.tpLevel, tp));
+        const stpPrice = isAccum
+          ? Math.round(fillPrice * (1 - sl))    // 매집: 고정 SL (추세 미형성)
+          : Math.round(calcStopPrice(fillPrice, fillKijun, sl, fillAtr));
         position = {
-          name, code, profileName, entryDate: d.date, entryPrice: fillPrice,
-          targetPrice: Math.round(calcTargetPrice(fillPrice, pending.tpLevel, tp)),
-          stopPrice: Math.round(calcStopPrice(fillPrice, fillKijun, sl, fillAtr)),
+          name, code, profileName: isAccum ? 'accumulation' : profileName,
+          entryDate: d.date, entryPrice: fillPrice,
+          targetPrice: tgtPrice, stopPrice: stpPrice,
           signalDate: pending.signalDate, signalScore: pending.signalScore,
           signalDetails: pending.signalDetails,
           limitPrice: pending.limitPrice, entryIdx: i,
@@ -1738,15 +1804,26 @@ function btSimulateV2(data, startIdx, params, name, code, profileName) {
     // 새 신호
     if (!position && !pending && inPeriod && i>=60) {
       if (i - lastSignalIdx < effectiveCooldown) continue;
-      const rsi=data[i].rsi;
-      if (rsi!=null && rsi<params.rsiMin) continue;
-      if (CONFIG.useRegimeFilter && _regimeFilter.loaded && _regimeFilter.isBearMarket(d.date)) continue;
-      const {score,details}=calcBuyScoreV2(data,i,profileName,params.benfordInfluence||0.15,params.benfordWindow||30,params.benfordMinHits||5);
-      if (score<params.threshold) continue;
-      const dp=calcDynamicPrices(data,i,tp,sl);
-      const limitPrice=dp.pendingLimit||d.close;
-      pending={signalDate:d.date,signalScore:Math.round(score*10)/10,limitPrice,tpLevel:dp.tpLevel,atrForSL:dp.atrForSL,signalDetails:details,signalIdx:i};
-      lastSignalIdx=i;
+      if (isAccum) {
+        // ── 매집 모드: SDE 패턴 기반 (RSI≥70 필터 없음) ──
+        const { score, details } = calcAccumulationScore(data, i, 'default');
+        if (score < (params.accumThreshold || CONFIG.accumThreshold || 5.0)) continue;
+        const limitPrice = d.close;  // 매집: 종가 진입
+        pending = { signalDate:d.date, signalScore:Math.round(score*10)/10, limitPrice,
+          tpLevel: d.close * (1 + tp), atrForSL:null, signalDetails:details, signalIdx:i };
+        lastSignalIdx = i;
+      } else {
+        // ── 모멘텀 모드: 기존 로직 그대로 ──
+        const rsi=data[i].rsi;
+        if (rsi!=null && rsi<params.rsiMin) continue;
+        if (CONFIG.useRegimeFilter && _regimeFilter.loaded && _regimeFilter.isBearMarket(d.date)) continue;
+        const {score,details}=calcBuyScoreV2(data,i,profileName,params.benfordInfluence||0.15,params.benfordWindow||30,params.benfordMinHits||5);
+        if (score<params.threshold) continue;
+        const dp=calcDynamicPrices(data,i,tp,sl);
+        const limitPrice=dp.pendingLimit||d.close;
+        pending={signalDate:d.date,signalScore:Math.round(score*10)/10,limitPrice,tpLevel:dp.tpLevel,atrForSL:dp.atrForSL,signalDetails:details,signalIdx:i};
+        lastSignalIdx=i;
+      }
     }
   }
   return trades;
@@ -2335,32 +2412,114 @@ async function loadRankingResult() {
 
 function renderRankingTable(rankings) {
   const tbody = document.getElementById('rankingTbody');
+  const thead = document.getElementById('rankingThead');
+  const subtitle = document.getElementById('rankingSubtitle');
+  const desc = document.getElementById('rankingDesc');
   const top30 = rankings.slice(0, 30);
   if (!top30.length) {
     tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#5A5450;padding:30px;">결과 없음</td></tr>';
     return;
   }
+
+  const isAccum = top30[0].profileName === 'accumulation';
+
+  // ── 헤더/설명 동적 전환 ──
+  if (isAccum) {
+    subtitle.textContent = '매집 감지 엔진 (SDE+VPD+벤포드)';
+    desc.textContent = '전체 ~3,500개 종목을 스캔하여 세이크아웃→건조→폭발 매집 패턴을 탐지합니다. (15~20분 소요)';
+    thead.innerHTML = `<tr>
+      <th>#</th>
+      <th>판정</th>
+      <th>종목</th><th>코드</th>
+      <th>확인<span class="help-tip">?<span class="ht-text">확인된 지표 수 (5개 만점)<br>SDE+VPD+벤포드+거래량+가격<br>많을수록 매집 신뢰도 높음<br>1차 정렬 기준</span></span></th>
+      <th>점수<span class="help-tip">?<span class="ht-text">매집 종합 점수 (16점 만점)<br>SDE(5)+VPD(4)+벤포드(3)+거래량(2)+가격(2)<br>2차 정렬 기준</span></span></th>
+      <th>RSI</th>
+      <th>SDE<span class="help-tip">?<span class="ht-text">세이크아웃→건조→폭발 패턴<br>급락 후 거래량 감소 → 폭발 대기<br>5점 (필수 게이트)</span></span></th>
+      <th>VPD<span class="help-tip">?<span class="ht-text">거래량-가격 괴리도<br>거래량 급증 대비 가격 변화 작음<br>≥5.0 강괴리(4점) ≥3.0 괴리(2.5점)</span></span></th>
+      <th>벤포드<span class="help-tip">?<span class="ht-text">벤포드 법칙 멀티윈도우 분석<br>거래량 분포 이상 탐지<br>강이탈(3점) 이탈(1.5점)</span></span></th>
+      <th>거래량<span class="help-tip">?<span class="ht-text">10일 거래량 압축도<br>평균 대비 비율 (낮을수록 건조)<br>&lt;0.6 건조(2점) &lt;0.8 감소(1점)</span></span></th>
+      <th>가격<span class="help-tip">?<span class="ht-text">20일 가격 레인지<br>좁을수록 매집 기반 형성<br>&lt;8% 압축(2점) &lt;12% 좁음(1점)</span></span></th>
+      <th>현재가</th>
+      <th>선정 사유</th>
+    </tr>`;
+  } else {
+    subtitle.textContent = '세력추종 로직 적합도';
+    desc.textContent = '전체 ~3,500개 종목을 스캔하여 세력추종 전략에 가장 적합한 종목을 선별합니다. (15~20분 소요)';
+    thead.innerHTML = `<tr>
+      <th>#</th>
+      <th>판정<span class="help-tip">?<span class="ht-text">투자 적합 여부<br>RSI≥70 + 시그널 임계 이상 → 투자<br>그 외 → 관망</span></span></th>
+      <th>종목</th><th>코드</th>
+      <th>종합<span class="help-tip">?<span class="ht-text">5개 요소 종합 점수 (100점 만점)<br>시그널(40)+RSI(20)+추세(15)+세력(15)+변동성(10)</span></span></th>
+      <th>시그널<span class="help-tip">?<span class="ht-text">매수 시그널 강도 (15점 만점)<br>5개 필수조건 + 12개 채점 요소<br>높을수록 매수 신호가 강함</span></span></th>
+      <th>RSI<span class="help-tip">?<span class="ht-text">상대강도지수 (0~100)<br>70 이상 = 강한 상승 모멘텀<br>≥70이어야 투자 적합 판정</span></span></th>
+      <th>추세<span class="help-tip">?<span class="ht-text">추세 건전성 (15점 만점)<br>MA 정배열(8)+구름위(4)+기준선위(3)<br>높을수록 상승 추세가 탄탄</span></span></th>
+      <th>세력<span class="help-tip">?<span class="ht-text">세력 감지 — 벤포드 분석 (15점 만점)<br>가격/거래량 패턴 이상 탐지<br>높을수록 기관/세력 매집 가능성↑</span></span></th>
+      <th>변동성<span class="help-tip">?<span class="ht-text">변동성 적합도 (10점 만점)<br>ATR% 2~6%가 최적 (10점)<br>너무 낮거나 높으면 감점</span></span></th>
+      <th>프로필</th><th>현재가</th><th>선정 사유</th>
+    </tr>`;
+  }
+
+  // ── 바디 렌더링 ──
   tbody.innerHTML = top30.map((r, i) => {
     const investBadge = r.investable
       ? '<span style="background:#1B3A1B;color:#4caf50;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">투자 진행</span>'
       : '<span style="background:#2A2220;color:#8A8480;padding:2px 8px;border-radius:8px;font-size:11px;">관망</span>';
-    const scoreColor = r.composite >= 60 ? '#f5c842' : r.composite >= 40 ? '#ff9800' : '#8A8480';
     const rsiColor = r.rsi >= 70 ? '#f5c842' : r.rsi >= 60 ? '#ff9800' : '#8A8480';
-    return `<tr style="cursor:pointer;" onclick="openStockFromRanking('${r.code}','${r.name}')">
-      <td style="font-weight:700;color:#f5c842;">${i+1}</td>
-      <td>${investBadge}</td>
-      <td style="font-weight:600;">${r.name}</td>
-      <td style="color:#7A7470;font-size:11px;">${r.code}</td>
-      <td style="color:${scoreColor};font-weight:800;font-size:15px;">${r.composite}</td>
-      <td>${r.buyScore}</td>
-      <td style="color:${rsiColor};font-weight:600;">${r.rsi}</td>
-      <td>${r.trendPts}/15</td>
-      <td>${r.benfordPts}/15</td>
-      <td>${r.volPts}/10</td>
-      <td style="font-size:11px;">${r.profileName}</td>
-      <td>${r.price?.toLocaleString()}</td>
-      <td style="font-size:11px;color:#9A9390;max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${r.reason}">${r.reason}</td>
-    </tr>`;
+
+    if (isAccum) {
+      const d = r.details || {};
+      const cc = r.confirmCount || 0;
+      const scoreColor = r.composite >= 12 ? '#4caf50' : r.composite >= 8 ? '#f5c842' : r.composite >= 5 ? '#ff9800' : '#8A8480';
+      const confirmColor = cc >= 4 ? '#4caf50' : cc >= 3 ? '#f5c842' : cc >= 2 ? '#ff9800' : '#8A8480';
+      // SDE: 항상 있음 (게이트 통과했으므로)
+      const sdeTd = d.sde ? `<span style="color:#4caf50;">${d.sde}</span>` : '<span style="color:#5A5450;">-</span>';
+      // VPD: 점수 여부에 따라 색상
+      const vpdHasScore = d.vpd && !d.vpd.includes('정상');
+      const vpdTd = d.vpd ? `<span style="color:${vpdHasScore ? '#f5c842' : '#5A5450'};">${d.vpd}</span>` : '<span style="color:#5A5450;">-</span>';
+      // 벤포드
+      const benHasScore = d.benford && !d.benford.includes('정상');
+      const benTd = d.benford ? `<span style="color:${benHasScore ? '#f5c842' : '#5A5450'};">${d.benford}</span>` : '<span style="color:#5A5450;">-</span>';
+      // 거래량
+      const volHasScore = d.vol_compress && !d.vol_compress.includes('보통') && !d.vol_compress.includes('데이터없음');
+      const volTd = d.vol_compress ? `<span style="color:${volHasScore ? '#f5c842' : '#5A5450'};">${d.vol_compress}</span>` : '<span style="color:#5A5450;">-</span>';
+      // 가격 기반
+      const baseHasScore = d.base && (d.base.includes('압축') || d.base.includes('좁음'));
+      const baseTd = d.base ? `<span style="color:${baseHasScore ? '#f5c842' : '#5A5450'};">${d.base}</span>` : '<span style="color:#5A5450;">-</span>';
+
+      return `<tr style="cursor:pointer;" onclick="openStockFromRanking('${r.code}','${r.name}')">
+        <td style="font-weight:700;color:#f5c842;">${i+1}</td>
+        <td>${investBadge}</td>
+        <td style="font-weight:600;">${r.name}</td>
+        <td style="color:#7A7470;font-size:11px;">${r.code}</td>
+        <td style="color:${confirmColor};font-weight:800;font-size:16px;">${cc}<span style="font-size:10px;color:#5A5450;">/5</span></td>
+        <td style="color:${scoreColor};font-weight:700;font-size:13px;">${r.composite}<span style="font-size:10px;color:#5A5450;">/16</span></td>
+        <td style="color:${rsiColor};font-weight:600;">${r.rsi}</td>
+        <td style="font-size:11px;">${sdeTd}</td>
+        <td style="font-size:11px;">${vpdTd}</td>
+        <td style="font-size:11px;">${benTd}</td>
+        <td style="font-size:11px;">${volTd}</td>
+        <td style="font-size:11px;">${baseTd}</td>
+        <td>${r.price?.toLocaleString()}</td>
+        <td style="font-size:11px;color:#9A9390;max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${r.reason}">${r.reason}</td>
+      </tr>`;
+    } else {
+      const scoreColor = r.composite >= 60 ? '#f5c842' : r.composite >= 40 ? '#ff9800' : '#8A8480';
+      return `<tr style="cursor:pointer;" onclick="openStockFromRanking('${r.code}','${r.name}')">
+        <td style="font-weight:700;color:#f5c842;">${i+1}</td>
+        <td>${investBadge}</td>
+        <td style="font-weight:600;">${r.name}</td>
+        <td style="color:#7A7470;font-size:11px;">${r.code}</td>
+        <td style="color:${scoreColor};font-weight:800;font-size:15px;">${r.composite}</td>
+        <td>${r.buyScore}</td>
+        <td style="color:${rsiColor};font-weight:600;">${r.rsi}</td>
+        <td>${r.trendPts}/15</td>
+        <td>${r.benfordPts}/15</td>
+        <td>${r.volPts}/10</td>
+        <td style="font-size:11px;">${r.profileName || ''}</td>
+        <td>${r.price?.toLocaleString()}</td>
+        <td style="font-size:11px;color:#9A9390;max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${r.reason}">${r.reason}</td>
+      </tr>`;
+    }
   }).join('');
 
   const investCount = top30.filter(r => r.investable).length;

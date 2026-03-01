@@ -22,6 +22,7 @@
   <div style="text-align:right">
     <div style="font-size:11px;color:#5A5450">RSI &ge; <span id="hdrRsiMin">70</span> 필터</div>
     <div style="font-size:11px;color:#5A5450" id="hdrProfile">프로필: auto</div>
+    <div style="font-size:11px;color:#5A5450" id="hdrScanMode">모드: momentum</div>
   </div>
 </header>
 
@@ -111,6 +112,19 @@
         <option value="large_cap">large_cap (대형주)</option>
         <option value="force_following">force_following (세력추종)</option>
       </select>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>스캔 모드<span class="help-tip">?<span class="ht-text">momentum=기존 RSI≥70 모멘텀 전략<br>accumulation=SDE 매집 감지 전략<br>검증: 1,360건 승률 57.9% EV +3.01%</span></span></label>
+      <select id="cfgScanMode">
+        <option value="momentum" selected>momentum (모멘텀)</option>
+        <option value="accumulation">accumulation (매집 감지)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>매집 임계값<span class="help-tip">?<span class="ht-text">매집 시그널 최소 점수 (16점 만점)<br>SDE 패턴만 통과해도 5.0점<br>VPD+벤포드 보조 시 최대 16점</span></span></label>
+      <input type="number" id="cfgAccumThreshold" value="5.0" step="0.5" min="3" max="12">
     </div>
   </div>
   <div class="form-row">
@@ -291,6 +305,18 @@
         <button onclick="btSelectAll()" style="background:#2A2825;border:1px solid #3A3733;color:#C8C2BC;padding:7px 14px;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap;">KOSPI 전체</button>
       </div>
       <div id="btSelectedLabel" style="margin-top:5px;font-size:12px;color:#8050D0;min-height:18px;"></div>
+    </div>
+
+    <!-- 전략 모드 선택 -->
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button id="btStratMomentum" class="active" onclick="btSetStrategy('momentum')"
+        style="flex:1;padding:8px;background:#352D45;border:1px solid #8050D0;color:#B898FF;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">
+        모멘텀 (RSI≥70)
+      </button>
+      <button id="btStratAccum" onclick="btSetStrategy('accumulation')"
+        style="flex:1;padding:8px;background:#2A2825;border:1px solid #3A3733;color:#7A7470;border-radius:6px;cursor:pointer;font-size:12px;">
+        매집 감지 (SDE)
+      </button>
     </div>
 
     <!-- 모드 토글 -->
@@ -501,7 +527,7 @@
 <div id="tab-top30" style="display:none">
   <div class="bt-card" style="border-color:#3A3820;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-      <h3 style="margin:0;border:0;padding:0;color:#f5c842;">Top 30 종목 추천 <span style="font-size:12px;color:#7A7470;font-weight:normal;">세력추종 로직 적합도</span></h3>
+      <h3 style="margin:0;border:0;padding:0;color:#f5c842;">Top 30 종목 추천 <span id="rankingSubtitle" style="font-size:12px;color:#7A7470;font-weight:normal;">세력추종 로직 적합도</span></h3>
       <div style="display:flex;align-items:center;gap:8px;">
         <button class="btn btn-primary btn-sm" onclick="startRanking()" id="rankingStartBtn" style="background:linear-gradient(135deg,#D4A020,#B08010);">전체 스캔 시작</button>
         <span id="rankingStatus" style="font-size:11px;color:#5A5450;"></span>
@@ -519,11 +545,11 @@
       </div>
     </div>
     <div style="font-size:11px;color:#5A5450;margin-bottom:12px;">
-      전체 ~3,500개 종목을 스캔하여 세력추종 전략에 가장 적합한 종목을 선별합니다. (15~20분 소요)
+      <span id="rankingDesc">전체 ~3,500개 종목을 스캔하여 세력추종 전략에 가장 적합한 종목을 선별합니다. (15~20분 소요)</span>
     </div>
     <!-- 결과 테이블 -->
     <div class="table-wrap">
-      <table><thead><tr>
+      <table><thead id="rankingThead"><tr>
         <th>#</th>
         <th>판정<span class="help-tip">?<span class="ht-text">투자 적합 여부<br>RSI≥70 + 시그널 임계 이상 → 투자<br>그 외 → 관망</span></span></th>
         <th>종목</th><th>코드</th>
